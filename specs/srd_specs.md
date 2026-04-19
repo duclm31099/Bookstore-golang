@@ -1,0 +1,989 @@
+# URD/SRD Chi Tiết Cho Bookstore Backend Monolith - Bản Đã Hiệu Chỉnh
+
+## 1. Kiểm soát tài liệu
+
+### 1.1 Mục đích tài liệu
+Tài liệu này định nghĩa đầy đủ yêu cầu nghiệp vụ, yêu cầu hệ thống, mô hình miền, quy tắc vận hành, kiến trúc kỹ thuật, ràng buộc triển khai, tiêu chí chấp nhận và định hướng mở rộng cho backend của một nền tảng bán sách trực tuyến tại Việt Nam. Hệ thống hỗ trợ ba nhóm sản phẩm chính: sách vật lý, sách số và gói membership. Backend được định hướng triển khai bằng Golang, Gin, PostgreSQL, Redis và Kafka trong kiến trúc modular monolith, đồng thời chuẩn bị dữ liệu hóa đơn điện tử để tích hợp với nhà cung cấp bên ngoài thay vì tự phát hành hóa đơn điện tử native trong phase 1.
+
+### 1.2 Đối tượng sử dụng tài liệu
+Tài liệu này dành cho:
+- founder hoặc product owner;
+- business analyst;
+- solution architect;
+- backend engineer;
+- DevOps engineer;
+- QA engineer;
+- admin / operations stakeholder;
+- reviewer kỹ thuật cần thẩm định tính đúng đắn của thiết kế.
+
+Tài liệu được viết đủ chi tiết để phục vụ:
+- phân rã module backend;
+- thiết kế schema và data ownership;
+- thiết kế API contract;
+- thiết kế state machine;
+- thiết kế Redis / Kafka / outbox / worker;
+- lập kế hoạch triển khai;
+- kiểm tra consistency giữa business flow và implementation blueprint.
+
+### 1.3 Tầm nhìn sản phẩm
+Sản phẩm là một nền tảng thương mại điện tử bán sách tại Việt Nam với các khả năng:
+- bán sách vật lý giao toàn quốc;
+- bán sách số dạng PDF và EPUB;
+- bán gói membership theo tháng và năm;
+- cho phép người dùng đọc online và tải sách số nếu họ mua riêng ebook hoặc có membership còn hiệu lực với đầu sách phù hợp;
+- hỗ trợ phương thức thanh toán online thực tế và COD cho đơn chỉ gồm sách vật lý;
+- cung cấp backoffice đầy đủ cho catalog, order, payment, refund, inventory, shipment, entitlement, báo cáo và audit.
+
+### 1.4 Tầm nhìn kiến trúc
+Hệ thống được triển khai theo mô hình **modular monolith**, tức là một runtime deployable duy nhất nhưng chia module nội bộ rõ ràng theo bounded context. Kafka vẫn được sử dụng như một event backbone có chủ đích cho background processing, retry, delayed workflow, outbox publishing và event-driven module integration, nhưng correctness cốt lõi vẫn nằm ở PostgreSQL. Redis được dùng cho cache, hot-path coordination, quota, session, idempotency, rate limit và flash-sale guard. Mục tiêu là giữ sự đơn giản vận hành của monolith trong giai đoạn đầu nhưng vẫn luyện trước discipline về event contract, outbox, consumer idempotency và background processing.
+
+### 1.5 Mục tiêu của bản hiệu chỉnh này
+Bản SRD này giữ lại toàn bộ phạm vi, tinh thần và phần lớn cấu trúc của SRD trước, nhưng sửa và bổ sung các điểm yếu sau:
+- loại bỏ mơ hồ về mô hình tham chiếu `sku_type + sku_id`;
+- bổ sung snapshot dữ liệu lịch sử cho order và order item;
+- tách rõ state machine của online payment và COD;
+- xác định chiến lược reservation tồn kho cho online payment bằng Pending Hold TTL có canonical state trong PostgreSQL;
+- làm rõ vai trò của Kafka trong monolith và nguyên tắc degrade khi Kafka gặp sự cố;
+- ghi rõ backend không stream file sách nặng trực tiếp cho client mà chỉ cấp signed download URL / pre-signed URL.
+
+## 2. Mục tiêu và tiêu chí thành công
+
+### 2.1 Mục tiêu kinh doanh
+- bán sách vật lý trên phạm vi Việt Nam;
+- bán sách số ở định dạng PDF và EPUB;
+- bán membership theo tháng và năm;
+- cho phép đọc online khi user có commercial right hợp lệ;
+- cho phép tải sách số thông qua signed temporary link;
+- hỗ trợ thanh toán Stripe, MoMo, VNPay, PayPal và COD cho đơn physical-only;
+- cung cấp admin backoffice tại `/api/v1/admin/*`.
+
+### 2.2 Mục tiêu kỹ thuật
+- correctness và auditability luôn ưu tiên hơn cache freshness;
+- PostgreSQL là source of truth cho transactional state;
+- Redis dùng để giảm độ trễ, giảm tải DB, hỗ trợ concurrency và ephemeral hot-state;
+- Kafka dùng cho asynchronous processing, retry, delayed workflow và event propagation thông qua outbox;
+- kiến trúc phải cho phép mở rộng sang search engine chuyên dụng, carrier integration và e-invoice provider integration về sau.
+
+### 2.3 Tiêu chí thành công
+- người dùng có thể duyệt, tìm kiếm, mua, đọc và tải theo entitlement rules;
+- admin có thể vận hành catalog, orders, payments, refunds, inventory, shipments, reports với audit đầy đủ;
+- duplicate payment callback, worker retry và repeated download request không làm sai state;
+- hệ thống degrade gracefully khi Redis hoặc Kafka tạm thời unavailable;
+- triển khai vẫn monolithic nhưng contracts, module boundaries và state ownership rõ ràng.
+
+## 3. Phạm vi
+
+### 3.1 In scope
+- public bookstore APIs;
+- admin APIs;
+- đăng ký, đăng nhập, session management, device registry;
+- catalog cho sách vật lý, ebook, membership plan, pricing, couponing;
+- cart và checkout;
+- online payment integration và COD;
+- refunds, partial refunds, chargebacks;
+- inventory reservation và single-shipment delivery model;
+- entitlement engine;
+- online reading cho PDF / EPUB;
+- download-link issuance và download history;
+- email notification;
+- outbox-driven Kafka publishing và Kafka consumers;
+- Redis-based cache, idempotency, rate limiting, session, device, cart, flash-sale guards;
+- e-invoice export staging để tích hợp provider ngoài.
+
+### 3.2 Out of scope cho phase 1
+- native e-invoice issuance engine;
+- DRM watermarking hoặc DRM-enforced local file revocation;
+- family account sharing;
+- native mobile app;
+- multi-seller marketplace;
+- multi-shipment orders;
+- content CMS cho chapter authoring và digital file versioning;
+- SMS, push hoặc in-app notifications.
+
+## 4. Giả định và ràng buộc
+
+### 4.1 Giả định kinh doanh
+- hệ thống phục vụ một pháp nhân bán hàng duy nhất;
+- chỉ phục vụ thị trường Việt Nam;
+- tiền tệ thanh toán và hạch toán là VND duy nhất trong phase 1;
+- chỉ những sách được gắn cờ membership-eligible mới được unlock bởi membership;
+- membership không làm thay đổi quyền mua hoặc giao sách vật lý;
+- khi membership hết hạn, file đã tải từ trước vẫn còn trên thiết bị người dùng, nhưng link tải cũ trong tài khoản không còn dùng được và không được cấp link membership-based mới.
+
+### 4.2 Ràng buộc kỹ thuật
+- PostgreSQL full-text search được dùng trước; Elasticsearch/OpenSearch để dành cho giai đoạn sau;
+- một order chỉ ánh xạ tới một shipment;
+- COD chỉ áp dụng cho physical-only order;
+- email là kênh notification duy nhất trong phase 1;
+- hệ thống phải đủ an toàn cho production-grade small system;
+- Kafka là yêu cầu có chủ đích ở phase đầu, nhưng business correctness không được phụ thuộc vào consumer side effects để commit transaction chính;
+- backend không được stream trực tiếp file nội dung số dung lượng lớn từ app server trong flow tải người dùng cuối.
+
+## 5. Thuật ngữ
+
+| Thuật ngữ | Định nghĩa |
+|---|---|
+| Book | Một đầu sách được bán trên nền tảng. |
+| Physical Book | Sách in có thể giao hàng. |
+| Ebook | Sách số ở định dạng PDF và/hoặc EPUB. |
+| Membership | Gói theo thời hạn cho quyền truy cập các sách số phù hợp. |
+| Membership-Eligible Book | Sách số được đánh dấu là thuộc chương trình membership. |
+| Entitlement | Quyền hiệu lực cho phép user đọc hoặc tải một đầu sách số theo nguồn mua lẻ, membership hoặc admin grant. |
+| Device | Môi trường client được hệ thống nhận diện cho login, reading hoặc downloading. |
+| Reader Session | Phiên đọc online được theo dõi để enforce giới hạn đồng thời. |
+| Download Token | Token hoặc metadata ngắn hạn dùng để cấp quyền tải asset. |
+| Signed Download URL | URL ngắn hạn do backend cấp để client tải trực tiếp từ object storage/CDN. |
+| Order | Giao dịch thương mại chứa một hoặc nhiều item mua được. |
+| Sellable SKU | Thực thể chuẩn hóa đại diện cho một đơn vị có thể bán, ví dụ physical book SKU, ebook SKU hoặc membership plan SKU. |
+| Payment Attempt | Một lần tương tác cụ thể với payment gateway cho một payment object. |
+| Refund | Hoàn tiền toàn phần hoặc một phần giá trị đã captured. |
+| Chargeback | Tranh chấp thanh toán phát sinh ngoài nền tảng. |
+| Inventory Reservation | Giữ tạm tồn kho cho một order vật lý. |
+| Pending Hold TTL | Khoảng thời gian giữ tồn kho tạm thời cho online payment trước khi hết hạn và tự nhả. |
+| Outbox Event | Event được lưu trong DB và publish ra Kafka sau commit. |
+| Idempotency Key | Khóa dùng để làm cho request lặp trở nên an toàn. |
+| Admin Override | Hành động đặc quyền vượt qua automation thông thường nhưng vẫn phải audit. |
+
+## 6. Ma trận actor
+
+| Actor | Năng lực | Giới hạn |
+|---|---|---|
+| Guest | duyệt sách, tìm kiếm, xem plan, đăng ký, đăng nhập | không thể mua, đọc, tải hoặc truy cập dữ liệu cá nhân |
+| Registered Customer | mua sách, quản lý cart, địa chỉ, thanh toán online, xem order, đọc sách sở hữu, tải sách sở hữu | không có quyền membership-only nếu membership không active |
+| Member | mọi quyền của customer + đọc/tải sách membership-eligible trong thời gian membership active | không được cấp link membership-based mới sau khi membership hết hạn |
+| Admin Operator | quản lý catalog, pricing, plans, users, orders, refunds, payments, inventory, shipment, reports, audit, notifications, overrides | phải được RBAC kiểm soát và audit toàn bộ |
+| Scheduler / Worker | xử lý background task, retry job, reconcile payment, gửi email, cập nhật status qua flow chuẩn | không có UI access; chỉ machine credentials và scoped permissions |
+
+## 7. Mô hình miền
+
+### 7.1 Core bounded modules
+- Identity
+- Catalog
+- Pricing
+- Membership
+- Cart
+- Checkout
+- Order
+- Payment
+- Refund
+- Chargeback
+- Entitlement
+- Reader
+- Inventory
+- Shipment
+- Notification
+- Audit
+- Reporting
+- E-invoice Export
+- Admin
+- Scheduler / Worker
+- Integration
+
+### 7.2 Aggregate overview
+
+| Aggregate | Mô tả | Primary ownership |
+|---|---|---|
+| User | định danh, hồ sơ, account state | Identity |
+| Session | refresh / access context, revocation | Identity |
+| Device | device registry và cap enforcement | Identity / Entitlement |
+| Address | địa chỉ người dùng phục vụ shipping | Identity |
+| Book | metadata thương mại và metadata đọc | Catalog |
+| BookFormat | khả năng đọc / tải / giao theo format | Catalog |
+| SellableSKU | đơn vị bán chuẩn hóa dùng cho cart/order references | Catalog / Pricing |
+| MembershipPlan | cấu hình plan và quota | Membership |
+| MembershipSubscription | vòng đời membership của user | Membership |
+| Cart | lựa chọn mutable trước order | Cart |
+| Order | cam kết mua hàng | Order |
+| OrderItem | line item snapshot | Order |
+| Payment | trạng thái giao dịch với gateway | Payment |
+| Refund | trạng thái hoàn tiền | Refund |
+| ChargebackCase | tranh chấp thanh toán | Chargeback |
+| Entitlement | quyền đọc / tải hiệu lực | Entitlement |
+| ReaderSession | phiên đọc online hiện hoạt | Reader |
+| DownloadRecord | yêu cầu tải và trạng thái consume | Download / Entitlement |
+| InventoryItem | summary tồn kho hiện tại | Inventory |
+| InventoryReservation | giữ tạm stock | Inventory |
+| Shipment | thực thể fulfillment | Shipment |
+| NotificationJob | yêu cầu gửi thông báo | Notification |
+| AuditLog | nhật ký bất biến | Audit |
+| OutboxEvent | record relay event | Integration |
+
+## 8. Quy tắc nghiệp vụ
+
+### 8.1 Quy tắc sản phẩm
+1. Một đầu sách có thể là physical-only, digital-only hoặc hybrid.
+2. Một đầu sách số có thể có PDF, EPUB hoặc cả hai.
+3. Một sách có thể được đánh dấu membership-eligible hoặc không.
+4. Membership không bao giờ mở khóa physical fulfillment.
+5. Người dùng vẫn có thể mua sách vật lý ngay cả khi membership đang active.
+6. Người dùng mua ebook riêng lẻ nhận commercial access lâu dài cho ebook đó trừ khi bị revoke vì refund, chargeback thua, fraud hoặc admin enforcement.
+
+### 8.2 Quy tắc membership
+1. Membership plan có loại tháng và năm.
+2. Membership chỉ cấp read/download rights cho các sách được gắn membership-eligible.
+3. Membership chỉ hiệu lực trong validity window.
+4. Khi membership hết hạn, link tải membership-based đã cấp từ trước trở nên unusable ở mức account-based access, và không cấp link membership-based mới.
+5. Người dùng vẫn giữ file đã tải trước đó vì phase 1 không có strong DRM hoặc remote revocation.
+6. Membership có thể renew hoặc extend.
+7. Membership stacking được phép và nếu membership hiện tại còn active thì end date mới phải nối tiếp từ expiry hiện tại.
+
+### 8.3 Quy tắc ebook purchase
+1. Người dùng mua ebook riêng lẻ được đọc online trong các format đã mua.
+2. Người dùng mua ebook riêng lẻ được tải subject to download, device và session policies.
+3. Ebook download luôn đi qua signed temporary link.
+4. Download history vẫn phải hiển thị dù sau này user không còn được cấp link mới.
+5. Backend chỉ cấp signed URL; client tải file trực tiếp từ object storage hoặc CDN.
+
+### 8.4 Quy tắc COD
+1. COD chỉ hỗ trợ cho physical-only orders.
+2. COD không được offer cho digital-only orders.
+3. COD không được offer cho mixed digital + physical orders trong phase 1.
+4. Inventory được reserve sau khi order COD được xác nhận thành công.
+5. COD chỉ được coi là collected khi shipment đi tới business state delivered-and-collected hoặc một state tương đương do shipment policy định nghĩa.
+6. COD refusal, delivery_failed hoặc return-to-origin phải cập nhật shipment state, order state và có thể trigger stock adjustment.
+7. COD phải có order state riêng để tránh nhầm lẫn giữa “đã sẵn sàng fulfillment” và “đã thu tiền”.
+
+### 8.5 Quy tắc payment
+1. Frontend redirect success không đủ chứng minh payment thành công.
+2. Webhook và reconciliation là nguồn xác nhận authoritative.
+3. Tất cả payment callback và retry phải idempotent.
+4. Một order có thể có nhiều payment attempts nhưng chỉ có một terminal commercial outcome.
+5. Totals luôn do server tính.
+6. Online payment cho physical order phải có cơ chế reserve stock với TTL trong lúc chờ gateway callback để tránh overselling.
+
+### 8.6 Quy tắc refund và chargeback
+1. Hỗ trợ full refund và partial refund.
+2. Refund eligibility phụ thuộc item type, fulfillment state và policy.
+3. Membership refund có thể revoke hoặc shorten rights tùy thời điểm và policy.
+4. Chargeback tạo dispute case và có thể freeze hoặc revoke related entitlements.
+5. Admin được phép override một số path refund nhưng mọi override phải audit.
+
+### 8.7 Quy tắc shipping và inventory
+1. Một order ánh xạ tới một shipment.
+2. Physical inventory phải theo dõi `on_hand`, `reserved` và `available`.
+3. Reservation phải được release nếu payment fail, payment expire hoặc order bị cancel trước shipment.
+4. Shipment carrier integration được abstract ở phase 1 và hỗ trợ webhook/polling contracts cho tương lai.
+5. Inventory reservation cho online payment phải có `expires_at` trong PostgreSQL và có scheduler release flow; Redis chỉ là hot-path guard chứ không phải canonical reservation store.
+
+### 8.8 Quy tắc bảo mật và truy cập
+1. Email verification là bắt buộc trước các hành động digital nhạy cảm như download.
+2. Session concurrency limit và device limit phải được enforce.
+3. Family sharing không được hỗ trợ.
+4. Admin override yêu cầu elevated permissions và audit log.
+5. Signed links phải short-lived.
+6. Abuse pattern như repeated download-link generation, excessive login attempts và coupon abuse phải được rate-limit.
+
+## 9. Luồng nghiệp vụ tuần tự
+
+### 9.1 Đăng ký và xác minh email
+1. Guest gửi thông tin đăng ký.
+2. Hệ thống kiểm tra uniqueness và password policy.
+3. Hệ thống tạo user ở trạng thái unverified.
+4. Hệ thống tạo verification-email command qua Kafka outbox.
+5. Email worker gửi email xác minh.
+6. User bấm link xác minh.
+7. Hệ thống đánh dấu email đã verified.
+
+### 9.2 Đơn COD chỉ có hàng vật lý
+1. User thêm sách vật lý vào cart.
+2. Hệ thống kiểm tra stock và địa chỉ giao hàng.
+3. User chọn COD.
+4. Hệ thống tạo order ở trạng thái `confirmed_cod` hoặc state COD tương đương.
+5. Hệ thống reserve stock trong PostgreSQL.
+6. Hệ thống tạo shipment ở trạng thái `pending_pack`.
+7. Admin / ops xử lý đóng gói và giao hàng.
+8. Carrier giao thành công và COD được thu.
+9. Hệ thống chuyển order sang `paid` rồi `fulfilled` hoặc cập nhật đồng thời theo policy tổng hợp.
+
+### 9.3 Online paid ebook order
+1. User thêm ebook vào cart.
+2. Hệ thống kiểm tra ownership conflict và reprice.
+3. User chọn payment gateway.
+4. Hệ thống tạo order và payment attempt.
+5. Nếu order có physical item thì hệ thống reserve stock với Pending Hold TTL; nếu order digital-only thì không cần inventory reservation.
+6. User được redirect sang gateway.
+7. Gateway trả callback/webhook.
+8. Hệ thống verify authenticity và transition payment.
+9. Nếu captured thành công, order trở thành `paid`.
+10. Entitlement được grant trong cùng transaction business hoặc qua immediate reliable post-payment process dùng outbox + consumer idempotent.
+11. Hệ thống phát email, audit và các side effects khác bất đồng bộ.
+12. Nếu payment timeout hoặc fail, reservation (nếu có) phải được release.
+
+### 9.4 Membership purchase
+1. User chọn membership plan.
+2. Hệ thống kiểm tra plan status và pricing.
+3. Payment flow hoàn tất.
+4. Membership subscription được tạo mới hoặc extend.
+5. Entitlement engine bắt đầu tính membership rights ngay lập tức.
+6. Email confirmation được gửi async.
+
+### 9.5 Download request
+1. User đã đăng nhập yêu cầu tải cho book và format cụ thể.
+2. Hệ thống kiểm tra email, session, device, entitlement, quota và policy.
+3. Hệ thống tạo download request record.
+4. Hệ thống sinh signed download URL ngắn hạn hoặc pre-signed URL từ object storage / CDN.
+5. User dùng URL đó để tải trực tiếp từ storage/CDN.
+6. Hệ thống ghi nhận token consumption và completion nếu observable.
+7. Nếu membership hết hạn sau đó, lịch sử link vẫn hiển thị nhưng link mới từ membership không còn được cấp.
+
+### 9.6 Refund workflow
+1. Refund request được tạo bởi admin hoặc rule-based workflow.
+2. Hệ thống kiểm tra refund eligibility ở mức item.
+3. Refund request được gửi tới payment gateway nếu applicable.
+4. Gateway webhook hoặc reconciliation xác nhận refund status.
+5. Hệ thống cập nhật refund state, order state và item states.
+6. Side effects về entitlement, shipment và inventory được áp dụng.
+7. Hệ thống phát email và audit events.
+
+## 10. State models
+
+### 10.1 Order states - online payment path
+
+| State | Ý nghĩa | Allowed transitions |
+|---|---|---|
+| draft | cart converted nhưng chưa submit | pending_payment, cancelled |
+| pending_payment | order đã được tạo, đang chờ user/gateway bắt đầu flow thanh toán | payment_processing, cancelled, failed |
+| payment_processing | đang chờ callback hoặc reconciliation | paid, failed, cancelled |
+| paid | cam kết tiền đã xác nhận | partially_fulfilled, fulfilled, refund_pending, partially_refunded, refunded, chargeback_open |
+| partially_fulfilled | một phần line đã fulfill | fulfilled, refund_pending, partially_refunded |
+| fulfilled | toàn bộ line đã fulfill | refund_pending, partially_refunded, refunded, chargeback_open |
+| cancel_requested | đang chờ xử lý hủy | cancelled, paid |
+| cancelled | terminal cancelled | none |
+| failed | terminal failure | none |
+| refund_pending | refund đã khởi tạo | partially_refunded, refunded |
+| partially_refunded | hoàn tiền một phần | refunded, chargeback_open |
+| refunded | hoàn tiền toàn phần | none |
+| chargeback_open | tranh chấp đang mở | chargeback_won, chargeback_lost |
+| chargeback_won | merchant thắng tranh chấp | paid, fulfilled, partially_refunded |
+| chargeback_lost | merchant thua tranh chấp | refunded, failed |
+
+### 10.2 Order states - COD path
+
+| State | Ý nghĩa | Allowed transitions |
+|---|---|---|
+| draft | cart converted nhưng chưa submit | confirmed_cod, cancelled |
+| confirmed_cod | order COD đã được chấp nhận, có thể reserve stock và tạo shipment | cod_in_delivery, cancelled, failed_cod |
+| cod_in_delivery | shipment đang xử lý hoặc đang giao, tiền chưa được coi là collected | paid, failed_cod, cancelled |
+| paid | COD đã thu thành công | fulfilled, refund_pending |
+| fulfilled | đơn COD hoàn tất thương mại và fulfillment | refund_pending, partially_refunded, refunded |
+| failed_cod | COD thất bại, từ chối nhận hoặc return-to-origin | cancelled, failed |
+| cancelled | terminal cancelled | none |
+| failed | terminal failure | none |
+| refund_pending | refund initiated sau một số tình huống hợp lệ | partially_refunded, refunded |
+| partially_refunded | hoàn tiền một phần | refunded |
+| refunded | hoàn tiền toàn phần | none |
+
+### 10.3 Payment states
+
+| State | Ý nghĩa | Allowed transitions |
+|---|---|---|
+| initiated | payment object hoặc attempt đã tạo | pending, failed, cancelled |
+| pending | đang chờ user hoặc gateway | authorized, captured, failed, expired, cancelled |
+| authorized | tiền chỉ mới authorize | captured, cancelled, expired |
+| captured | thanh toán hoàn tất | refunded_partial, refunded_full, chargeback_open |
+| failed | thanh toán thất bại | none |
+| expired | timeout | none |
+| cancelled | hủy có chủ đích | none |
+| refunded_partial | hoàn tiền một phần | refunded_full, chargeback_open |
+| refunded_full | hoàn tiền toàn phần | none |
+| chargeback_open | tranh chấp mở | chargeback_resolved |
+| chargeback_resolved | tranh chấp đóng | none |
+
+### 10.4 Membership states
+
+| State | Ý nghĩa | Allowed transitions |
+|---|---|---|
+| pending_activation | đã thanh toán nhưng chưa activate | active, cancelled |
+| active | membership hợp lệ | grace, expired, revoked |
+| grace | tùy chọn grace period | active, expired |
+| expired | hết hạn tự nhiên | renewed |
+| renewed | trạng thái chuyển tiếp khi extend | active |
+| revoked | bị force-terminate | none |
+| cancelled | refund trước activation | none |
+
+### 10.5 Entitlement states
+
+| State | Ý nghĩa | Allowed transitions |
+|---|---|---|
+| active | được đọc / tải theo policy | suspended, expired, revoked |
+| suspended | tạm khóa | active, revoked |
+| expired | quyền time-based đã hết | none |
+| revoked | bị gỡ quyền do refund, chargeback, fraud hoặc admin | none |
+
+### 10.6 Shipment states
+
+| State | Ý nghĩa | Allowed transitions |
+|---|---|---|
+| pending_pack | order đã sẵn sàng cho đóng gói | packed, cancelled |
+| packed | đã đóng gói | awaiting_pickup, cancelled |
+| awaiting_pickup | chờ bàn giao carrier | in_transit, cancelled |
+| in_transit | đang đi trong carrier network | delivered, delivery_failed, returning |
+| delivered | giao hoàn tất | none |
+| delivery_failed | giao thất bại | in_transit, returning, cancelled |
+| returning | đang hoàn hàng | returned |
+| returned | về lại kho | cancelled, refund_pending |
+| cancelled | shipment canceled | none |
+
+### 10.7 Nguyên tắc state ownership
+- `order_state` và `payment_state` là hai state machine khác nhau, không được nhập làm một;
+- COD không được giả lập bằng việc gán `paid` sớm;
+- shipment state không được dùng thay order state, nhưng order có thể derive summary outcome từ shipment event;
+- mọi transition trạng thái canonical phải đi qua module owner tương ứng và được audit theo policy.
+
+## 11. Public API surface
+
+### 11.1 Auth và account
+- `POST /api/v1/auth/register`
+- `POST /api/v1/auth/verify-email`
+- `POST /api/v1/auth/login`
+- `POST /api/v1/auth/refresh`
+- `POST /api/v1/auth/logout`
+- `POST /api/v1/auth/forgot-password`
+- `POST /api/v1/auth/reset-password`
+- `GET /api/v1/me`
+- `GET /api/v1/me/sessions`
+- `DELETE /api/v1/me/sessions/{sessionId}`
+- `GET /api/v1/me/devices`
+- `DELETE /api/v1/me/devices/{deviceId}`
+
+### 11.2 Catalog và search
+- `GET /api/v1/books`
+- `GET /api/v1/books/{bookId}`
+- `GET /api/v1/books/{bookId}/formats`
+- `GET /api/v1/authors`
+- `GET /api/v1/categories`
+- `GET /api/v1/search/books`
+- `GET /api/v1/membership/plans`
+
+### 11.3 Cart và checkout
+- `GET /api/v1/cart`
+- `POST /api/v1/cart/items`
+- `PATCH /api/v1/cart/items/{itemId}`
+- `DELETE /api/v1/cart/items/{itemId}`
+- `POST /api/v1/cart/coupon`
+- `DELETE /api/v1/cart/coupon`
+- `POST /api/v1/checkout/preview`
+- `POST /api/v1/checkout/orders`
+
+### 11.4 Orders và payments
+- `GET /api/v1/orders`
+- `GET /api/v1/orders/{orderId}`
+- `POST /api/v1/orders/{orderId}/cancel`
+- `POST /api/v1/orders/{orderId}/pay`
+- `GET /api/v1/payments/{paymentId}`
+- `POST /api/v1/payments/webhooks/{provider}`
+
+### 11.5 Membership và library
+- `GET /api/v1/me/membership`
+- `GET /api/v1/me/library`
+- `GET /api/v1/me/downloads`
+
+### 11.6 Reader và download
+- `POST /api/v1/reader/sessions`
+- `POST /api/v1/reader/sessions/{sessionId}/heartbeat`
+- `DELETE /api/v1/reader/sessions/{sessionId}`
+- `GET /api/v1/books/{bookId}/read`
+- `POST /api/v1/books/{bookId}/download-links`
+
+### 11.7 Address và shipment view
+- `GET /api/v1/me/addresses`
+- `POST /api/v1/me/addresses`
+- `PATCH /api/v1/me/addresses/{addressId}`
+- `DELETE /api/v1/me/addresses/{addressId}`
+- `GET /api/v1/orders/{orderId}/shipment`
+
+### 11.8 Quy tắc API quan trọng cần ghi rõ
+- endpoint download-links chỉ trả về signed URL / pre-signed URL và metadata liên quan, không trả binary file stream;
+- checkout/order creation endpoint phải yêu cầu idempotency key cho mutation nhạy cảm;
+- client không được gọi bất kỳ endpoint nào để tự đánh dấu order là paid;
+- payment finalization chỉ đến từ verified webhook hoặc reconciliation.
+
+## 12. Admin API surface
+
+### 12.1 Catalog admin
+- `GET /api/v1/admin/books`
+- `POST /api/v1/admin/books`
+- `GET /api/v1/admin/books/{bookId}`
+- `PATCH /api/v1/admin/books/{bookId}`
+- `POST /api/v1/admin/books/{bookId}/publish`
+- `POST /api/v1/admin/books/{bookId}/unpublish`
+- `GET /api/v1/admin/authors`
+- `POST /api/v1/admin/authors`
+- `GET /api/v1/admin/categories`
+- `POST /api/v1/admin/categories`
+
+### 12.2 Membership admin
+- `GET /api/v1/admin/membership/plans`
+- `POST /api/v1/admin/membership/plans`
+- `PATCH /api/v1/admin/membership/plans/{planId}`
+- `POST /api/v1/admin/users/{userId}/membership/grant`
+- `POST /api/v1/admin/users/{userId}/membership/revoke`
+- `POST /api/v1/admin/users/{userId}/membership/extend`
+
+### 12.3 Order, payment, refund, chargeback admin
+- `GET /api/v1/admin/orders`
+- `GET /api/v1/admin/orders/{orderId}`
+- `POST /api/v1/admin/orders/{orderId}/cancel`
+- `POST /api/v1/admin/orders/{orderId}/refunds`
+- `GET /api/v1/admin/payments`
+- `POST /api/v1/admin/payments/{paymentId}/reconcile`
+- `GET /api/v1/admin/chargebacks`
+- `POST /api/v1/admin/chargebacks/{chargebackId}/resolve`
+
+### 12.4 Inventory và shipment admin
+- `GET /api/v1/admin/inventory`
+- `PATCH /api/v1/admin/inventory/{bookId}`
+- `GET /api/v1/admin/reservations`
+- `GET /api/v1/admin/shipments`
+- `POST /api/v1/admin/shipments/{shipmentId}/status`
+- `POST /api/v1/admin/shipments/{shipmentId}/carrier-sync`
+
+### 12.5 User và entitlement admin
+- `GET /api/v1/admin/users`
+- `GET /api/v1/admin/users/{userId}`
+- `POST /api/v1/admin/users/{userId}/lock`
+- `POST /api/v1/admin/users/{userId}/unlock`
+- `POST /api/v1/admin/users/{userId}/force-logout`
+- `POST /api/v1/admin/users/{userId}/entitlements/grant`
+- `POST /api/v1/admin/users/{userId}/entitlements/revoke`
+- `GET /api/v1/admin/users/{userId}/sessions`
+- `GET /api/v1/admin/users/{userId}/devices`
+
+### 12.6 Audit, reporting, notification, invoice export
+- `GET /api/v1/admin/audit-logs`
+- `GET /api/v1/admin/reports/sales`
+- `GET /api/v1/admin/reports/memberships`
+- `GET /api/v1/admin/reports/downloads`
+- `POST /api/v1/admin/notifications/email`
+- `GET /api/v1/admin/e-invoice/exports`
+- `POST /api/v1/admin/e-invoice/exports/{exportId}/retry`
+
+## 13. Main Database Schema
+
+### 13.1 Identity tables
+
+| Bảng | Mục đích | Key columns |
+|---|---|---|
+| users | user profile và account state | id, email, email_verified_at, status, created_at |
+| user_credentials | password hash và auth metadata | user_id, password_hash, password_changed_at |
+| user_sessions | refresh/session registry | id, user_id, device_id, refresh_token_hash, ip, ua, expires_at, revoked_at |
+| user_devices | device registry | id, user_id, fingerprint, label, first_seen_at, last_seen_at, revoked_at |
+| addresses | user shipping addresses | id, user_id, full_name, phone, province, district, ward, line1, line2 |
+
+### 13.2 Catalog tables
+
+| Bảng | Mục đích | Key columns |
+|---|---|---|
+| books | catalog entity cốt lõi | id, slug, title, description, product_type, published, membership_eligible |
+| book_formats | digital/physical availability | id, book_id, format, asset_path, reader_mode, downloadable |
+| authors | author records | id, name, slug |
+| categories | category records | id, name, slug |
+| book_authors | many-to-many join | book_id, author_id |
+| book_categories | many-to-many join | book_id, category_id |
+| prices | price history hoặc effective price table | id, subject_type, subject_id, list_price_vnd, sale_price_vnd, starts_at, ends_at |
+| search_documents | FTS support nếu normalized riêng | subject_type, subject_id, tsv |
+| sellable_skus | chuẩn hóa thực thể bán được để cart/order tham chiếu | id, sku_code, sku_type, book_id, membership_plan_id, format, active |
+
+### 13.3 Membership và entitlement tables
+
+| Bảng | Mục đích | Key columns |
+|---|---|---|
+| membership_plans | plan definitions | id, code, name, duration_days, price_vnd, max_devices, max_concurrent_sessions, max_downloads |
+| memberships | user subscription instances | id, user_id, plan_id, starts_at, expires_at, state, source_order_id |
+| entitlements | effective commercial rights | id, user_id, book_id, source_type, source_id, state, starts_at, expires_at |
+| reader_sessions | active reading sessions | id, user_id, book_id, device_id, started_at, last_heartbeat_at, ended_at |
+| downloads | download history và token use | id, user_id, book_id, format, source_type, token_id, requested_at, consumed_at, status |
+
+### 13.4 Cart, order, payment tables
+
+| Bảng | Mục đích | Key columns |
+|---|---|---|
+| carts | durable cart snapshot | id, user_id, state, coupon_code, expires_at |
+| cart_items | cart lines | id, cart_id, sellable_sku_id, qty, price_snapshot_vnd |
+| orders | commercial order header | id, user_id, order_no, currency, subtotal_vnd, shipping_fee_vnd, discount_vnd, total_vnd, state, shipping_address_snapshot, billing_snapshot |
+| order_items | order line snapshots | id, order_id, sellable_sku_id, item_state, qty, unit_price_vnd, final_unit_price_vnd, line_total_vnd, book_id, membership_plan_id, item_title_snapshot |
+| payments | canonical payment object | id, order_id, provider, state, amount_vnd, external_ref |
+| payment_attempts | gateway attempts | id, payment_id, attempt_no, state, request_payload, response_payload |
+| refunds | refund records | id, order_id, payment_id, amount_vnd, state, reason_code |
+| chargebacks | dispute cases | id, payment_id, order_id, state, amount_vnd, opened_at, resolved_at |
+| coupons | coupon definitions | id, code, type, value_vnd, usage_limit, starts_at, ends_at |
+| coupon_redemptions | coupon usage history | id, coupon_id, user_id, order_id, redeemed_at |
+| order_state_logs | order state transition history | id, order_id, from_state, to_state, trigger_code, actor_type, actor_id, created_at |
+
+#### 13.4.1 Quy tắc schema đã hiệu chỉnh
+- `cart_items` và `order_items` không còn dùng cặp tham chiếu polymorphic `sku_type + sku_id` làm canonical reference;
+- cả hai bảng tham chiếu tới `sellable_skus` để giữ referential integrity;
+- `order_items` vẫn snapshot thêm `book_id`, `membership_plan_id`, `item_title_snapshot`, `unit_price_vnd`, `final_unit_price_vnd` để phục vụ lịch sử và refund;
+- `orders` bắt buộc snapshot địa chỉ giao hàng và dữ liệu billing/invoice đầu vào để order lịch sử không bị lệ thuộc vào bảng `addresses` mutable.
+
+### 13.5 Inventory và shipping tables
+
+| Bảng | Mục đích | Key columns |
+|---|---|---|
+| inventory_items | stock summary | book_id, on_hand, reserved, available, version |
+| inventory_reservations | stock holds | id, order_id, book_id, qty, state, expires_at |
+| shipments | shipment header | id, order_id, carrier_code, tracking_no, state |
+| shipment_status_logs | shipment history | id, shipment_id, state, source, raw_payload, created_at |
+
+#### 13.5.1 Reservation model đã hiệu chỉnh
+- online payment physical order được reserve ở thời điểm order confirmation thành công trước redirect hoặc ngay trong transaction tạo order, nếu policy xác định item là reservable;
+- reservation record phải có `expires_at` để cho phép release tự động khi payment không hoàn tất trong Pending Hold TTL;
+- scheduler hoặc worker sẽ phát command release reservation khi quá TTL;
+- Redis flash-sale guard chỉ là lớp pre-check/hot-path chống race và abuse, không thay thế reservation record trong PostgreSQL.
+
+### 13.6 Operations tables
+
+| Bảng | Mục đích | Key columns |
+|---|---|---|
+| notifications | email job và delivery status | id, channel, template_code, recipient, state, attempts |
+| audit_logs | immutable audit trail | id, actor_type, actor_id, action, resource_type, resource_id, metadata, created_at |
+| outbox_events | guaranteed event publishing | id, topic, event_key, payload, state, created_at, published_at |
+| e_invoice_exports | invoice export staging | id, order_id, buyer_payload, invoice_payload, provider_state, provider_ref |
+| processed_events | consumer idempotency table | consumer_name, event_id, processed_at |
+
+## 14. Kafka Event Catalog
+
+### 14.1 Event envelope
+Mọi Kafka message phải có envelope chuẩn:
+- `event_id`
+- `event_type`
+- `aggregate_type`
+- `aggregate_id`
+- `occurred_at`
+- `produced_at`
+- `trace_id`
+- `correlation_id`
+- `causation_id`
+- `actor_type`
+- `actor_id`
+- `schema_version`
+- `idempotency_key`
+- `payload`
+
+### 14.2 Topics
+
+| Topic | Mục đích | Keying strategy |
+|---|---|---|
+| `order.events.v1` | order state changes | order_id |
+| `payment.events.v1` | payment lifecycle | order_id hoặc payment_id |
+| `membership.events.v1` | membership lifecycle | user_id |
+| `entitlement.events.v1` | grant/revoke/suspend | user_id |
+| `inventory.events.v1` | reservation và stock updates | book_id |
+| `shipment.events.v1` | shipment lifecycle | shipment_id |
+| `notification.commands.v1` | email job commands | recipient hoặc logical business key |
+| `scheduler.commands.v1` | delayed / periodic commands | command key |
+| `audit.events.v1` | audit fan-out | resource_id |
+| `reporting.events.v1` | analytics/report aggregation | business key |
+| `dlq.general.v1` | dead-letter topic | original key |
+
+### 14.3 Mandatory domain events
+
+| Event | Produced by | Consumed by |
+|---|---|---|
+| `user.registered` | Identity | Notification, Audit |
+| `user.email_verified` | Identity | Audit |
+| `order.created` | Order | Audit, Reporting |
+| `order.paid` | Payment / Order | Entitlement, Inventory, Notification, Invoice Export, Reporting |
+| `order.cancelled` | Order | Inventory, Notification, Reporting |
+| `payment.captured` | Payment | Order, Notification, Reporting |
+| `payment.failed` | Payment | Notification, Reporting, Inventory release flow nếu applicable |
+| `payment.expired` | Payment | Notification, Reporting, Inventory release flow nếu applicable |
+| `payment.refund_requested` | Refund | Payment adapter worker, Audit |
+| `payment.refunded` | Payment | Order, Entitlement, Notification, Reporting |
+| `membership.activated` | Membership | Notification, Reporting |
+| `membership.expired` | Scheduler / Membership | Entitlement, Notification |
+| `entitlement.granted` | Entitlement | Audit, Reporting |
+| `entitlement.revoked` | Entitlement | Reader, Notification, Audit |
+| `download.link_issued` | Download / Entitlement | Audit, Reporting |
+| `download.completed` | Download / CDN callback layer nếu observable | Reporting |
+| `inventory.reserved` | Inventory | Audit |
+| `inventory.released` | Inventory | Audit |
+| `shipment.status_changed` | Shipment | Notification, Reporting |
+| `invoice.export_requested` | Order / Invoice Export | e-invoice integration worker |
+| `invoice.export_failed` | Invoice Export | admin alert / reporting |
+
+### 14.4 Kafka processing rules
+- events chỉ được publish sau DB commit qua outbox;
+- consumer phải idempotent bằng `processed_events` hoặc cơ chế dedup tương đương;
+- consumer phải hỗ trợ retry hữu hạn và DLQ fallback;
+- email, cache invalidation và side effects khác phải tolerate duplicate delivery;
+- scheduler không mutate domain trực tiếp mà phát command hoặc gọi normal service flow;
+- nếu Kafka unavailable, transaction business chính vẫn commit vào PostgreSQL, outbox backlog được chấp nhận và publish lại sau;
+- không sử dụng Kafka như điều kiện bắt buộc để transaction core được xem là thành công.
+
+### 14.5 Ghi chú về Kafka trong modular monolith
+Kafka là quyết định có chủ đích cho học tập và chuẩn hóa event-driven processing ngay từ phase 1, nhưng không được hiểu là mọi tương tác nội bộ synchronous phải đi vòng qua Kafka. Use case synchronous trong cùng process vẫn có thể gọi service trực tiếp; Kafka chủ yếu dùng cho asynchronous side effects, delayed commands, integration boundary và reliable background processing.
+
+## 15. Redis Design
+
+### 15.1 Redis objectives
+Redis được dùng để giảm latency, giảm tải DB, cung cấp primitive thuận tiện cho concurrency và hỗ trợ ephemeral high-churn state. PostgreSQL vẫn là durable source of truth cho business state.
+
+### 15.2 Primary Redis use cases
+- catalog và book detail caching;
+- search-result caching;
+- cart caching;
+- session và token hot-path lookup;
+- device registry hot-path checks;
+- rate limiting;
+- idempotency key storage;
+- distributed locks;
+- flash-sale stock guard;
+- job deduplication;
+- short-lived download token metadata;
+- optional pending-hold helper key cho fast expiry scanning, nhưng không thay thế inventory_reservations trong DB.
+
+### 15.3 Key design
+
+| Key pattern | Purpose | TTL |
+|---|---|---|
+| `catalog:list:{hash}` | cached list results | 5-15 min |
+| `book:detail:{book_id}` | book detail cache | 10-30 min |
+| `search:books:{hash}` | search cache | 1-5 min |
+| `cart:{user_id}` | hot cart snapshot | 1-7 ngày hoặc sliding TTL |
+| `session:{session_id}` | session metadata | theo session expiry |
+| `user:sessions:{user_id}` | active sessions index | theo latest session expiry |
+| `device:{user_id}:{device_id}` | device registry hot lookup | long TTL hoặc explicit invalidation |
+| `idem:{scope}:{key}` | idempotency result | 5 phút đến 24 giờ |
+| `lock:{resource}` | distributed lock | ngắn, vài giây |
+| `quota:download:{user_id}:{book_id}` | download counters | theo policy |
+| `rate:{scope}:{subject}` | rate limit bucket | giây đến phút |
+| `jobdedup:{job_type}:{biz_key}` | worker dedup | theo policy |
+| `dltoken:{token_id}` | download token metadata | ngắn |
+| `hold:{order_id}` | optional fast lookup cho reservation timeout | tối đa bằng Pending Hold TTL |
+
+### 15.4 Redis rules
+- cache-aside cho catalog;
+- event-driven invalidation sau admin mutations;
+- Redis outage phải degrade về PostgreSQL cho correctness-critical flow nếu có thể;
+- distributed locks chỉ cho short critical sections;
+- không lưu canonical order/payment/refund state chỉ trong Redis;
+- quota increment và compare-and-set phải atomic;
+- hold TTL trong Redis không phải canonical business record; canonical reservation luôn ở PostgreSQL.
+
+## 16. NFR
+
+### 16.1 Hiệu năng
+- p95 cho authenticated API call điển hình không có external gateway dependency nên dưới 300 ms;
+- p95 cho cached catalog/detail/search nên dưới 100 ms;
+- cart operations phải responsive dưới concurrent access vừa phải;
+- reader heartbeat phải lightweight và scale được;
+- download-link issuance phải nhanh vì backend chỉ authorize và cấp signed URL, không stream file nặng.
+
+### 16.2 Availability và resilience
+- hệ thống phải degrade gracefully nếu Redis unavailable;
+- Kafka outage không được làm corrupt primary transactional state; outbox backlog là chấp nhận được;
+- background retry phải ngăn mất dữ liệu cho notifications và provider-sync tasks;
+- payment uncertainty phải được reconcile async;
+- reservation timeout cho online payment phải có release mechanism deterministic qua scheduler/worker.
+
+### 16.3 Reliability
+- duplicate webhook delivery không được duplicate money capture, entitlement grant hoặc refund effects;
+- inventory reservation phải transactionally safe chống overselling;
+- entitlement checks phải đúng kể cả khi cache stale;
+- audit log phải tồn tại cho privileged actions;
+- history order không được thay đổi sai khi user sửa địa chỉ hoặc khi giá catalog thay đổi sau giao dịch.
+
+### 16.4 Maintainability
+- boundaries nội bộ phải được tôn trọng;
+- mỗi module phải expose service interface và domain events phù hợp;
+- error codes phải standardized;
+- API versioning dùng `/api/v1`;
+- schema documentation phải phản ánh ownership và snapshot strategy rõ ràng.
+
+### 16.5 Compliance và retention
+- dữ liệu phục vụ e-invoice export phải được giữ theo company policy và legal obligations;
+- business transaction records phải được lưu đủ cho đối soát, support và audit;
+- audit logs và payment callback raw data cần retention đủ dài cho dispute / reconciliation.
+
+### 16.6 Logging và observability
+- structured JSON logs;
+- correlation IDs và trace IDs xuyên HTTP, DB, Kafka và provider calls;
+- metrics cho Redis hit rate, DB pool, HTTP latency, Kafka lag, payment success/failure, refund errors, entitlement failures, notification retries và reservation expiry release success/failure;
+- health endpoints cho liveness, readiness và dependency readiness.
+
+## 17. Security Requirements
+
+### 17.1 Authentication và session security
+- password phải hash bằng Argon2id hoặc bcrypt production-grade;
+- access tokens phải short-lived;
+- refresh tokens phải rotatable và revocable;
+- concurrent sessions phải quan sát và terminate được bởi user hoặc admin.
+
+### 17.2 Authorization
+- public và admin APIs phải tách biệt hoàn toàn;
+- admin endpoints yêu cầu RBAC và có thể có finer-grained permissions;
+- admin override phải audit actor, resource, before/after context và rationale.
+
+### 17.3 Transport và secret protection
+- TLS bắt buộc ở production;
+- provider secrets phải nằm ngoài source code;
+- webhook verification secrets phải rotate an toàn.
+
+### 17.4 Abuse controls
+- rate limiting theo IP, endpoint và user;
+- login brute-force protection;
+- download-link generation throttling;
+- coupon abuse detection và order-submission idempotency;
+- session và device anomaly logging;
+- online payment hold abuse phải được giảm thiểu bằng rate limit, idempotency, checkout throttling và reservation TTL.
+
+### 17.5 Digital content protection posture
+Phase 1 không triển khai watermarking hay strong DRM. Vì vậy backend có thể chặn cấp link mới hoặc revoke account-based access, nhưng không đảm bảo thu hồi các file local đã được tải trước đó. Đây là giới hạn đã biết của mô hình DRM-free distribution.
+
+## 18. Acceptance Criteria by Module
+
+### 18.1 Identity module
+- guest có thể đăng ký bằng email duy nhất;
+- user chưa verify không thể thực hiện protected digital download actions;
+- refresh token rotation invalidate chain cũ theo policy;
+- user có thể list và revoke active sessions;
+- device registration được enforce và capped.
+
+### 18.2 Catalog module
+- guests và users có thể list và search books với filters;
+- membership eligibility hiển thị trong book detail và queryable trong filters;
+- admin changes invalidate cache predictably;
+- search dùng PostgreSQL full-text search và cho kết quả phù hợp;
+- sellable SKU model cho phép referential integrity rõ giữa catalog và commerce tables.
+
+### 18.3 Cart module
+- cart hỗ trợ physical books, ebooks và membership plans;
+- duplicate-ineligible items bị chặn theo policy;
+- server recalculates totals trước checkout;
+- idempotent cart updates không tạo duplicates dưới retry;
+- cart lines tham chiếu tới sellable SKU hợp lệ.
+
+### 18.4 Checkout và order module
+- physical-only cart có thể chọn COD;
+- digital-only hoặc mixed digital cart không thể chọn COD;
+- online-payment orders vào `pending_payment` đúng cách;
+- successful payment transition order sang `paid`;
+- failed hoặc expired payment không tạo entitlement;
+- COD order đi vào COD-specific state thay vì `paid` sớm;
+- shipping/billing snapshots được lưu khi tạo order;
+- order_items giữ `unit_price_vnd` và `final_unit_price_vnd` để partial refund khả thi.
+
+### 18.5 Payment module
+- Stripe, MoMo, VNPay và PayPal integrations có thể tạo payment attempts;
+- duplicate gateway callbacks không double-transition payment state;
+- reconciliation job có thể resolve uncertain payment states;
+- payment state changes được audit;
+- online payment timeout hoặc failure release reservation nếu có.
+
+### 18.6 Membership module
+- user có thể mua monthly hoặc yearly plans;
+- membership extends từ current expiry nếu đang active;
+- membership chỉ unlock books flagged membership-eligible;
+- membership expiry chặn membership-based download mới.
+
+### 18.7 Entitlement và reader module
+- ebook mua riêng đọc online được;
+- ebook membership-eligible đọc online được khi membership active;
+- download link issuance kiểm tra entitlement, device, session, quota và verification;
+- reader concurrency limit được enforce;
+- last read position được persist cho EPUB và PDF khi phù hợp;
+- API download chỉ trả signed URL, không stream file binary qua app server.
+
+### 18.8 Inventory và shipment module
+- stock được reserve trên eligible order confirmation theo policy;
+- reservation được release khi cancel, payment fail hoặc payment expire;
+- shipment state changes được track trong history;
+- COD-delivered shipment đánh dấu order là paid theo COD completion rule;
+- reservation cho online payment có TTL rõ ràng và không làm sai source of truth.
+
+### 18.9 Refund và chargeback module
+- full refund và partial refund đều có thể khi policy cho phép;
+- refund completion cập nhật financial state và entitlement state;
+- chargeback case có thể freeze hoặc adjust rights theo policy;
+- mọi override đều audit;
+- refund calculation có thể dựa trên unit price snapshot và line-level discount snapshot.
+
+### 18.10 Notification module
+- email jobs được produce bất đồng bộ;
+- worker retry transient failures;
+- duplicate event delivery không gửi duplicate email khi dedup policy áp dụng.
+
+### 18.11 Audit module
+- mọi admin override tạo immutable audit log;
+- sensitive business transitions tạo searchable audit entries;
+- audit logs filter được theo actor, resource, date range và action.
+
+### 18.12 Integration, Kafka và Redis module
+- transactional outbox đảm bảo committed business events eventually được publish;
+- Kafka consumers idempotent;
+- DLQ được populate sau khi retry exhaustion;
+- Redis cache miss không phá correctness;
+- idempotency và rate limiting hoạt động dưới concurrent load;
+- Kafka outage không chặn commit business transaction chính;
+- Redis outage không làm mất canonical reservation records.
+
+## 19. Testing Strategy Requirements
+
+### 19.1 Unit testing
+- domain services cho pricing, entitlement, membership extension, refund eligibility, order policy;
+- Redis utility logic và key policy logic;
+- payment adapter mappers;
+- state machine unit tests cho online path và COD path.
+
+### 19.2 Integration testing
+- PostgreSQL transaction flows cho checkout, payment finalization, inventory reservation, entitlement grant, refund;
+- Redis-integrated quota và idempotency checks;
+- Kafka outbox publishing và consumer idempotency;
+- webhook verification và duplicate callback handling;
+- reservation expiry release flow;
+- order snapshot persistence consistency tests.
+
+### 19.3 End-to-end và scenario testing
+- register -> verify -> buy ebook -> read -> download;
+- buy membership -> read eligible book -> download -> expire membership;
+- physical-only COD order -> ship -> deliver -> mark paid;
+- online payment success và failed reconciliation cases;
+- full refund và partial refund cases;
+- chargeback case handling;
+- concurrent checkout trên stock hạn chế với payment timeout.
+
+### 19.4 Performance và resilience testing
+- search và catalog cache hit load;
+- concurrent checkout trên limited stock;
+- reader heartbeat at scale;
+- Redis failure fallback;
+- Kafka backlog và recovery behavior;
+- signed URL issuance under burst download requests;
+- reservation sweep worker throughput.
+
+## 20. Open Extension Paths
+
+### 20.1 Planned future evolution
+- Elasticsearch/OpenSearch cho advanced search;
+- real carrier integrations;
+- thêm notification channels;
+- stronger content protection nếu business sau này chọn DRM tooling;
+- advanced recommendation và reporting pipelines;
+- event streaming cho external consumers.
+
+### 20.2 Migration safety
+Thiết kế hiện tại cố tình ưu tiên modular monolith để business rules tập trung trong khi async infrastructure được đưa vào qua Kafka, outbox và worker discipline. Điều này giữ implementation đơn giản hơn trong giai đoạn đầu, đồng thời cho phép tách module ra sau nếu quy mô hệ thống hoặc cấu trúc đội ngũ đòi hỏi. Việc chuẩn hóa sellable SKU reference, snapshot order history, COD-specific states và reservation TTL từ giai đoạn này giúp giảm chi phí refactor kiến trúc về sau.
+
+## 21. Quyết định hiệu chỉnh so với bản cũ
+
+### 21.1 Những gì được giữ nguyên
+- phạm vi business và technical objectives;
+- định hướng modular monolith;
+- PostgreSQL là source of truth;
+- Redis cho cache/hot-path;
+- Kafka cho asynchronous processing;
+- hỗ trợ physical books, ebooks, membership, COD, inventory, shipment, entitlement, reader, downloads, refunds, chargebacks, e-invoice export staging;
+- public/admin API surface chính;
+- định hướng outbox, retry, idempotency, rate limiting, audit, observability.
+
+### 21.2 Những gì được sửa và bổ sung
+- thay canonical polymorphic `sku_type + sku_id` bằng `sellable_skus` reference để bảo toàn referential integrity;
+- bổ sung shipping/billing snapshot và line-item price snapshot;
+- bổ sung COD-specific order states;
+- chốt Pending Hold TTL cho online-payment physical orders với canonical reservation ở PostgreSQL;
+- làm rõ Kafka là event backbone có chủ đích nhưng không được làm transaction core phụ thuộc cứng vào consumer;
+- ghi rõ download flow là signed URL / pre-signed URL, không stream file trực tiếp qua app server.
+
+## 22. Kết luận áp dụng
+Bản SRD này là tài liệu gốc mới cho phase planning hiện tại. Mọi tài liệu chi tiết hơn như ADR pack, State Transition Specification, OpenAPI Specs, Data Dictionary, Golang Module Boundary Blueprint, Test Strategy và Runbook phải được hiểu là bám theo bản SRD đã hiệu chỉnh này. Nếu có mâu thuẫn giữa tài liệu cũ và bản này ở các điểm đã sửa, bản này là nguồn sự thật ưu tiên hơn.
