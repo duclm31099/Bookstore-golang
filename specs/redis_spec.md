@@ -576,8 +576,8 @@ download:token:v1:{token_id}
 - tối đa 15 phút nếu có yêu cầu mạng yếu, nhưng phase hiện tại khuyến nghị 5 phút.
 
 **Use case**
-- xác thực link tải nhanh ở file-serving layer;
-- tránh query DB mỗi lần mở link.
+- xác thực metadata cho Signed Download URL tại CDN/file-serving layer;
+- tránh query DB liên tục mỗi lần mở link, tự rụng khi hết TTL ngắn.
 
 ### 7.7.2 Download single-use marker
 
@@ -803,7 +803,7 @@ webhook:dedup:v1:invoice:{provider}:{external_event_id}
 
 **Key pattern**
 ```text
-stock:guard:v1:{book_id}
+stock:guard:v1:{sellable_sku_id}
 ```
 
 **Value**
@@ -814,13 +814,13 @@ stock:guard:v1:{book_id}
 
 **Use case**
 - absorb spike đọc stock trong flash sale;
-- pre-check trước khi vào reservation transaction.
+- pre-check trước khi vào transaction tạo Pending Hold TTL ở PostgreSQL. Mọi Canonical State vẫn nằm ở DB.
 
 ### 7.12.2 Reservation pending short-lived
 
 **Key pattern**
 ```text
-stock:pending:v1:{book_id}:{request_id}
+stock:pending:v1:{sellable_sku_id}:{request_id}
 ```
 
 **TTL**
