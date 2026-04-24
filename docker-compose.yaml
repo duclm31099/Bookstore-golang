@@ -1,0 +1,181 @@
+version: "3.9"
+
+networks:
+  bookstore-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  kafka_data:
+  zookeeper_data:
+
+services:
+  # ============================================================
+  # POSTGRESQL
+  # ============================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: bookstore-postgres
+    restart: unless-stopped
+    networks: [bookstore-net]
+    ports:
+      - "${DB_PORT}:5432"
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================
+  # REDIS
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: bookstore-redis
+    restart: unless-stopped
+    networks: [bookstore-net]
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================
+  # REDIS for ASYNQ (separate DB index)
+  # same redis instance, different DB index controlled by env
+  # ============================================================
+
+  # ============================================================
+  # ZOOKEEPER (for Kafka)
+  # ============================================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: bookstore-zookeeper
+    restart: unless-stopped
+    networks: [bookstore-net]
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+
+  # ============================================================
+  # KAFKA
+  # ============================================================
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: bookstore-kafka
+    restart: unless-stopped
+    networks: [bookstore-net]
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: true
+      KAFKA_LOG_RETENTION_HOURS: 168
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "kafka-topics",
+          "--bootstrap-server",
+          "localhost:9092",
+          "--list",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ============================================================
+  # KAFKA UI (optional dev tool)
+  # ============================================================
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: bookstore-kafka-ui
+    restart: unless-stopped
+    networks: [bookstore-net]
+    ports:
+      - "8085:8080"
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_CLUSTERS_0_NAME: bookstore-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+
+  # ============================================================
+  # MINIO (OBJECT STORAGE)
+  # ============================================================
+  minio:
+    image: minio/minio:latest
+    container_name: bookstore-minio
+    restart: unless-stopped
+    networks: [bookstore-net]
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ============================================================
+  # MAILHOG (SMTP DEV CATCHER)
+  # ============================================================
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: bookstore-mailhog
+    restart: unless-stopped
+    networks: [bookstore-net]
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  # ============================================================
+  # ASYNQMON (BACKGROUND JOB MONITOR UI)
+  # ============================================================
+  asynqmon:
+    image: hibiken/asynqmon:latest
+    container_name: bookstore-asynqmon
+    restart: unless-stopped
+    networks: [bookstore-net]
+    ports:
+      - "${ASYNQMON_PORT}:8080"
+    environment:
+      REDIS_ADDR: redis:6379
+      REDIS_DB: ${ASYNQ_REDIS_DB}
+    depends_on:
+      - redis

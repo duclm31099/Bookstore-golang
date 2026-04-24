@@ -1,0 +1,49 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+bin/
+dist/
+vendor/
+
+# Air
+tmp/
+
+# Wire generated
+after_gen/
+wire_gen.tmp
+
+# Env
+.env
+.env.*
+!.env.dev
+
+# Secrets
+*.pem
+*.key
+*.crt
+secrets/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Coverage
+coverage.out
+coverage.html
+
+# Build artifacts
+/bookstore-api
+/bookstore-worker
+/bookstore-scheduler
+/bookstore-migrate
+
+# Docker
+docker-compose.override.yml

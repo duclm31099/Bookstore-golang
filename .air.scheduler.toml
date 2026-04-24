@@ -1,0 +1,12 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/bookstore-scheduler ./cmd/scheduler/main.go"
+  bin = "./tmp/bookstore-scheduler"
+  full_bin = "./tmp/bookstore-scheduler"
+  include_ext = ["go", "yaml"]
+  exclude_dir = ["assets", "tmp", "vendor", ".git", "test"]
+  include_dir = ["cmd/scheduler", "internal"]
+  delay = 1200
+  stop_on_error = true
