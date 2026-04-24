@@ -2,7 +2,6 @@
 package bootstrap
 
 import (
-	"fmt"
 	"net/http"
 	"time"
 
@@ -13,11 +12,11 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/duclm99/bookstore-backend-v2/internal/platform/config"
-	platformdb "github.com/duclm99/bookstore-backend-v2/internal/platform/db"
-	platformhttpx "github.com/duclm99/bookstore-backend-v2/internal/platform/httpx"
-	platformlogger "github.com/duclm99/bookstore-backend-v2/internal/platform/logger"
-	platformredis "github.com/duclm99/bookstore-backend-v2/internal/platform/redis"
-	platformtx "github.com/duclm99/bookstore-backend-v2/internal/platform/tx"
+	db "github.com/duclm99/bookstore-backend-v2/internal/platform/db"
+	httpx "github.com/duclm99/bookstore-backend-v2/internal/platform/httpx"
+	logger "github.com/duclm99/bookstore-backend-v2/internal/platform/logger"
+	redis "github.com/duclm99/bookstore-backend-v2/internal/platform/redis"
+	tx "github.com/duclm99/bookstore-backend-v2/internal/platform/tx"
 )
 
 func ProvideConfig() *config.Config {
@@ -25,7 +24,7 @@ func ProvideConfig() *config.Config {
 }
 
 func ProvideLogger(cfg *config.Config) (*zap.Logger, func(), error) {
-	log, err := platformlogger.New(cfg.Logger)
+	log, err := logger.New(cfg.Logger)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -38,7 +37,7 @@ func ProvideLogger(cfg *config.Config) (*zap.Logger, func(), error) {
 }
 
 func ProvideDBPool(cfg *config.Config) (*pgxpool.Pool, func(), error) {
-	pool, err := platformdb.NewPool(cfg.DB)
+	pool, err := db.NewPool(cfg.DB)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -50,12 +49,12 @@ func ProvideDBPool(cfg *config.Config) (*pgxpool.Pool, func(), error) {
 	return pool, cleanup, nil
 }
 
-func ProvideTxManager(pool *pgxpool.Pool) *platformtx.Manager {
-	return platformtx.NewManager(pool)
+func ProvideTxManager(pool *pgxpool.Pool) *tx.Manager {
+	return tx.NewManager(pool)
 }
 
 func ProvideRedis(cfg *config.Config) (*goredis.Client, func(), error) {
-	rdb, err := platformredis.NewRedisClient(cfg.Redis)
+	rdb, err := redis.NewRedisClient(cfg.Redis)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -68,15 +67,11 @@ func ProvideRedis(cfg *config.Config) (*goredis.Client, func(), error) {
 }
 
 func ProvideGinEngine(cfg *config.Config, log *zap.Logger) *gin.Engine {
-	return platformhttpx.NewRouter(cfg.App, log)
+	return httpx.NewRouter(cfg, log)
 }
 
 func ProvideHTTPServer(cfg *config.Config, engine *gin.Engine) *http.Server {
-	return &http.Server{
-		Addr:              fmt.Sprintf(":%s", cfg.App.Port),
-		Handler:           engine,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	return httpx.NewServer(engine, cfg.App.Port)
 }
 
 func ProvideShutdownTimeout(cfg *config.Config) time.Duration {

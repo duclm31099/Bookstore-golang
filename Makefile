@@ -42,12 +42,18 @@ wire: ## Generate Wire injectors
 .PHONY: dev dev-worker dev-scheduler
 
 dev: wire ## Run API with air
+	wire ./internal/bootstrap && \
+	docker compose up -d && \
 	air -c .air.api.toml
 
 dev-worker: wire ## Run worker with air
+	wire ./internal/bootstrap && \
+	docker compose up -d && \
 	air -c .air.worker.toml
 
 dev-scheduler: wire ## Run scheduler with air
+	wire ./internal/bootstrap && \
+	docker compose up -d && \
 	air -c .air.scheduler.toml
 
 .PHONY: run-api run-worker run-scheduler
@@ -78,7 +84,7 @@ migrate-create: ## Create migration (usage: make migrate-create name=create_user
 
 .PHONY: infra-up infra-down infra-reset infra-ps infra-logs
 infra-up: ## Start local infra
-	docker compose up -d
+	wire ./internal/bootstrap && docker compose up -d
 
 infra-down: ## Stop local infra
 	docker compose down
