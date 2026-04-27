@@ -14,11 +14,18 @@ func InitializeAPIApp() (*APIApp, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	engine := ProvideGinEngine(config, logger)
+	client, cleanup2, err := ProvideRedis(config)
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	healthHandler := ProvideHealthHandler(config, client)
+	engine := ProvideGinEngine(config, logger, healthHandler)
 	server := ProvideHTTPServer(config, engine)
 	duration := ProvideShutdownTimeout(config)
 	apiApp := ProvideAPIApp(server, logger, duration)
 	return apiApp, func() {
+		cleanup2()
 		cleanup()
 	}, nil
 }

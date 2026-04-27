@@ -1,9 +1,14 @@
+//go:build wireinject
+// +build wireinject
+
 package bootstrap
 
-// func InitializeAPIApp() (*APIApp, func(), error) {
-// 	wire.Build(APISet)
-// 	return nil, nil, nil
-// }
+import "github.com/google/wire"
+
+func InitializeAPIApp() (*APIApp, func(), error) {
+	wire.Build(APISet)
+	return nil, nil, nil
+}
 
 // func InitializeWorkerApp() (*WorkerApp, func(), error) {
 // 	wire.Build(WorkerSet)

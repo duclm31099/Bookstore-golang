@@ -18,7 +18,7 @@ type KafkaConfig struct {
 
 func loadKafkaConfig() KafkaConfig {
 	return KafkaConfig{
-		Brokers:         strings.Split(mustGetEnv("KAFKA_BROKERS"), ""), // localhost:9092
+		Brokers:         strings.Split(mustGetEnv("KAFKA_BROKERS"), ","),
 		ConsumerGroupID: mustGetEnv("KAFKA_CONSUMER_GROUP_ID"),
 		ClientID:        mustGetEnv("KAFKA_CLIENT_ID"),
 		MaxRetry:        getEnvAsInt("KAFKA_MAX_RETRY", 3),
