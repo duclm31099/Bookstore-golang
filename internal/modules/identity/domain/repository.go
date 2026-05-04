@@ -39,7 +39,7 @@ type SessionRepository interface {
 	Insert(ctx context.Context, session *entity.Session) error
 	GetByRefreshTokenHash(ctx context.Context, hash string) (*entity.Session, error)
 	ListActiveByUserID(ctx context.Context, userID int64) ([]*entity.Session, error)
-	Revoke(ctx context.Context, id int64, revokedAt time.Time) error
+	Revoke(ctx context.Context, id int64, userID int64, revokedAt time.Time) error
 	GetByRefreshTokenHashForUpdate(ctx context.Context, hash string) (*entity.Session, error)
 	RevokeAllByUserID(ctx context.Context, userID int64, revokedAt time.Time) error
 }

@@ -6,6 +6,14 @@
 
 package bootstrap
 
+import (
+	"github.com/duclm99/bookstore-backend-v2/internal/modules/identity/app/service"
+	"github.com/duclm99/bookstore-backend-v2/internal/modules/identity/http"
+	"github.com/duclm99/bookstore-backend-v2/internal/modules/identity/http/middleware"
+	"github.com/duclm99/bookstore-backend-v2/internal/modules/identity/infra/adapters"
+	"github.com/duclm99/bookstore-backend-v2/internal/modules/identity/infra/postgres"
+)
+
 // Injectors from wire.go:
 
 func InitializeAPIApp() (*APIApp, func(), error) {
@@ -14,17 +22,46 @@ func InitializeAPIApp() (*APIApp, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	client, cleanup2, err := ProvideRedis(config)
+	pool, cleanup2, err := ProvideDBPool(config)
 	if err != nil {
 		cleanup()
 		return nil, nil, err
 	}
-	healthHandler := ProvideHealthHandler(config, client)
-	engine := ProvideGinEngine(config, logger, healthHandler)
+	manager := ProvideTxManager(pool)
+	txManager := ProvideTxManagerInterface(manager)
+	userRepository := postgres.NewUserRepository(pool)
+	credentialRepository := postgres.NewCredentialRepository(pool)
+	sessionRepository := postgres.NewSessionRepository(pool)
+	deviceRepository := postgres.NewDeviceRepository(pool)
+	queryRepository := postgres.NewQueryRepository(pool)
+	passwordHasher := adapters.ProvideBcryptHasher(config)
+	tokenManager := adapters.ProvideJWTTokenManager(config)
+	client, cleanup3, err := ProvideRedis(config)
+	if err != nil {
+		cleanup2()
+		cleanup()
+		return nil, nil, err
+	}
+	verificationTokenService := adapters.ProvideRedisVerificationTokenService(client)
+	eventPublisher := adapters.ProvideLogEventPublisher(logger)
+	clock := adapters.ProvideRealClock()
+	registerPolicy := service.ProvideRegisterPolicy()
+	devicePolicy := service.ProvideDevicePolicy()
+	authService := service.NewAuthService(txManager, userRepository, credentialRepository, sessionRepository, deviceRepository, queryRepository, passwordHasher, tokenManager, verificationTokenService, eventPublisher, clock, registerPolicy, devicePolicy)
+	authHandler := http.NewAuthHandler(authService)
+	profileService := service.NewProfileService(txManager, userRepository, deviceRepository, queryRepository, sessionRepository, clock)
+	profileHandler := http.NewProfileHandler(profileService)
+	addressRepository := postgres.NewAddressRepository(pool)
+	addressService := service.NewAddressService(addressRepository, txManager)
+	addressHandler := http.NewAddressHandler(addressService, profileService)
+	auth := ProvideAuthManager(config)
+	handlerFunc := middleware.NewAuthMiddleware(auth)
+	engine := ProvideGinEngine(config, logger, authHandler, profileHandler, addressHandler, handlerFunc)
 	server := ProvideHTTPServer(config, engine)
 	duration := ProvideShutdownTimeout(config)
 	apiApp := ProvideAPIApp(server, logger, duration)
 	return apiApp, func() {
+		cleanup3()
 		cleanup2()
 		cleanup()
 	}, nil

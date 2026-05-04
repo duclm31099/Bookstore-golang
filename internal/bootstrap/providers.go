@@ -5,9 +5,10 @@ import (
 	"net/http"
 	"time"
 
+	identity_service "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/app/service"
+	identity_http "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/http"
 	identity_adapters "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/infra/adapters"
 	identity_postgres "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/infra/postgres"
-	identity_service "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/app/service"
 	auth "github.com/duclm99/bookstore-backend-v2/internal/platform/auth"
 	"github.com/duclm99/bookstore-backend-v2/internal/platform/config"
 	db "github.com/duclm99/bookstore-backend-v2/internal/platform/db"
@@ -16,6 +17,8 @@ import (
 	"github.com/duclm99/bookstore-backend-v2/internal/platform/observability"
 	redis "github.com/duclm99/bookstore-backend-v2/internal/platform/redis"
 	tx "github.com/duclm99/bookstore-backend-v2/internal/platform/tx"
+	"github.com/duclm99/bookstore-backend-v2/internal/platform/idempotency"
+	"github.com/duclm99/bookstore-backend-v2/internal/platform/kafka"
 	"github.com/gin-gonic/gin"
 	"github.com/google/wire"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -82,8 +85,42 @@ func ProvideHealthHandler(cfg *config.Config, redisClient *goredis.Client) *obse
 	return observability.NewHealthHandler(redisClient, cfg)
 }
 
-func ProvideGinEngine(cfg *config.Config, log *zap.Logger, healthHandler *observability.HealthHandler) *gin.Engine {
-	return httpx.NewRouter(cfg, log, healthHandler)
+func ProvideKafkaConfig(cfg *config.Config) kafka.Config {
+	kafkaCfg := kafka.DefaultConfig()
+	if len(cfg.Kafka.Brokers) > 0 {
+		kafkaCfg.Brokers = cfg.Kafka.Brokers
+	}
+	if cfg.Kafka.ClientID != "" {
+		kafkaCfg.ClientID = cfg.Kafka.ClientID
+	}
+	if cfg.Kafka.ConsumerGroupID != "" {
+		kafkaCfg.ConsumerGroupID = cfg.Kafka.ConsumerGroupID
+	}
+	return kafkaCfg
+}
+
+func ProvideIdempotencyDBTX(pool *pgxpool.Pool) idempotency.DBTX {
+	return pool
+}
+
+func ProvideUniversalRedisClient(client *goredis.Client) goredis.UniversalClient {
+	return client
+}
+
+func ProvideGinEngine(
+	cfg *config.Config,
+	log *zap.Logger,
+	authHandler *identity_http.AuthHandler,
+	profileHandler *identity_http.ProfileHandler,
+	addressHandler *identity_http.AddressHandler,
+	authMiddleware gin.HandlerFunc,
+) *gin.Engine {
+	engine := httpx.NewRouter(cfg, log)
+
+	// Nhúng router identity
+	identity_http.RegisterRoutes(engine, authHandler, profileHandler, addressHandler, authMiddleware)
+
+	return engine
 }
 
 func ProvideHTTPServer(cfg *config.Config, engine *gin.Engine) *http.Server {
@@ -109,8 +146,13 @@ var PlatformSet = wire.NewSet(
 	ProvideTxManager,
 	ProvideTxManagerInterface,
 	ProvideRedis,
+	ProvideUniversalRedisClient,
 	ProvideAuthManager,
 	ProvideHealthHandler,
+	ProvideKafkaConfig,
+	kafka.ProviderSet,
+	ProvideIdempotencyDBTX,
+	idempotency.ProviderSet,
 )
 
 var HTTPSet = wire.NewSet(
@@ -119,25 +161,30 @@ var HTTPSet = wire.NewSet(
 	ProvideShutdownTimeout,
 )
 
-var APISet = wire.NewSet(
-	PlatformSet,
-	HTTPSet,
-	ModuleSet,
-	ProvideAPIApp,
+var IdentityModuleSet = wire.NewSet(
+	identity_postgres.ProviderSet,
+	identity_adapters.ProviderSet,
+	identity_service.ProviderSet,
+	identity_http.ProviderSet, // Thêm provider set của HTTP layer
+
+	// Interface bindings
+	wire.Bind(new(identity_http.AuthUseCase), new(*identity_service.AuthService)),
+	wire.Bind(new(identity_http.ProfileUseCase), new(*identity_service.ProfileService)),
+	wire.Bind(new(identity_http.AddressUseCase), new(*identity_service.AddressService)),
+	wire.Bind(new(identity_http.AddressQueryUseCase), new(*identity_service.ProfileService)),
 )
 
 // ModuleSet gom tất cả infrastructure và service của mọi module
 var ModuleSet = wire.NewSet(
-	// Identity: postgres repositories
-	identity_postgres.ProviderSet,
-	// Identity: port adapters (hasher, token, verify, event, clock)
-	identity_adapters.ProviderSet,
-	// Identity: application services
-	identity_service.ProviderSet,
+	// Identity Module Set
+	IdentityModuleSet,
+)
 
-	// Nơi đây sẽ là bến đỗ cho mọi module sau này:
-	// catalog_postgres.ProviderSet,
-	// order_postgres.ProviderSet,
+var APISet = wire.NewSet(
+	PlatformSet, // Everything Infrastructure
+	HTTPSet,     // Gin Server router
+	ModuleSet,   // Module Business
+	ProvideAPIApp,
 )
 
 // var WorkerRuntimeSet = wire.NewSet(

@@ -2,9 +2,9 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -23,10 +23,6 @@ func NewRedisVerificationTokenService(rdb *goredis.Client) *RedisVerificationTok
 	return &RedisVerificationTokenService{rdb: rdb}
 }
 
-type verifyPayload struct {
-	UserID int64 `json:"user_id"`
-}
-
 // IssueEmailVerificationToken tạo random token, lưu vào Redis với TTL 24h.
 func (s *RedisVerificationTokenService) IssueEmailVerificationToken(ctx context.Context, userID int64) (string, error) {
 	rawToken, err := generateSecureToken()
@@ -34,13 +30,12 @@ func (s *RedisVerificationTokenService) IssueEmailVerificationToken(ctx context.
 		return "", fmt.Errorf("generate verify token: %w", err)
 	}
 
-	payload, err := json.Marshal(verifyPayload{UserID: userID})
-	if err != nil {
-		return "", err
-	}
-
+	// Tối ưu Master: Ép kiểu int64 sang chuỗi base 10 siêu tốc, không cần cấp phát object hay json marshal
+	userIDStr := strconv.FormatInt(userID, 10)
 	key := emailVerifyPrefix + rawToken
-	if err := s.rdb.Set(ctx, key, payload, emailVerifyTTL).Err(); err != nil {
+
+	// Thư viện go-redis hỗ trợ truyền trực tiếp string làm value
+	if err := s.rdb.Set(ctx, key, userIDStr, emailVerifyTTL).Err(); err != nil {
 		return "", fmt.Errorf("store verify token: %w", err)
 	}
 
@@ -51,7 +46,8 @@ func (s *RedisVerificationTokenService) IssueEmailVerificationToken(ctx context.
 func (s *RedisVerificationTokenService) ParseEmailVerificationToken(ctx context.Context, token string) (int64, error) {
 	key := emailVerifyPrefix + token
 
-	raw, err := s.rdb.GetDel(ctx, key).Bytes()
+	// Sử dụng Result() thay vì Bytes() để lấy thẳng ra chuỗi string
+	userIDStr, err := s.rdb.GetDel(ctx, key).Result()
 	if err != nil {
 		if errors.Is(err, goredis.Nil) {
 			return 0, fmt.Errorf("verification token not found or already used")
@@ -59,10 +55,11 @@ func (s *RedisVerificationTokenService) ParseEmailVerificationToken(ctx context.
 		return 0, fmt.Errorf("get verify token: %w", err)
 	}
 
-	var p verifyPayload
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return 0, fmt.Errorf("decode verify token payload: %w", err)
+	// Parse chuỗi về lại int64
+	userID, err := strconv.ParseInt(userIDStr, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse user id from redis value: %w", err)
 	}
 
-	return p.UserID, nil
+	return userID, nil
 }

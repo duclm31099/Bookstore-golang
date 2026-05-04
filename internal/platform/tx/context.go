@@ -13,8 +13,16 @@ func WithTx(ctx context.Context, t pgx.Tx) context.Context {
 }
 
 func ExtractTx(ctx context.Context) (pgx.Tx, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+
 	t, ok := ctx.Value(txKey{}).(pgx.Tx)
-	return t, ok
+	if !ok || t == nil {
+		return nil, false
+	}
+	return t, true
+
 }
 
 func GetExecutor(ctx context.Context, pool *pgxpool.Pool) db.Executor {

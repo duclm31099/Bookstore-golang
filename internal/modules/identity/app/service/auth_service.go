@@ -313,7 +313,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, cmd command.RefreshToken
 }
 
 func (s *AuthService) Logout(ctx context.Context, cmd command.LogoutCommand) error {
-	return s.sessions.Revoke(ctx, cmd.SessionID, s.clock.Now())
+	return s.sessions.Revoke(ctx, cmd.SessionID, cmd.UserID, s.clock.Now())
 }
 
 func (s *AuthService) VerifyEmail(ctx context.Context, cmd command.VerifyEmailCommand) error {

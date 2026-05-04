@@ -2,10 +2,18 @@ package tx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+var (
+	ErrNilPool        = errors.New("tx: nil pgx pool")
+	ErrNilCallback    = errors.New("tx: nil transaction callback")
+	ErrCommitFailed   = errors.New("tx: commit failed")
+	ErrRollbackFailed = errors.New("tx: rollback failed")
 )
 
 /*
@@ -27,6 +35,12 @@ func NewPoolManager(pool *pgxpool.Pool) *Manager {
 // Tuyệt đối không bao giờ được ném nó sang một Goroutine chạy ngầm (Asynchronous).
 // Nếu cần chạy ngầm gọi DB, bạn phải dùng context.Background() để tạo một luồng riêng không có transaction.
 func (m *Manager) WithinTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
+	if fn == nil {
+		return ErrNilCallback
+	}
+	if m.pool == nil {
+		return ErrNilPool
+	}
 	// 1. Xử lý Nested Transaction
 	if _, ok := ExtractTx(ctx); ok {
 		return fn(ctx)
@@ -35,7 +49,7 @@ func (m *Manager) WithinTransaction(ctx context.Context, fn func(ctx context.Con
 	// 2. Khởi tạo Transaction
 	txx, err := m.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return err
 	}
 
 	// 3. Tấm khiên bảo vệ (QUAN TRỌNG NHẤT)
@@ -50,13 +64,15 @@ func (m *Manager) WithinTransaction(ctx context.Context, fn func(ctx context.Con
 
 	// 4. Thực thi Business Logic
 	if err := fn(ctx); err != nil {
-		// Không cần gọi txx.Rollback thủ công ở đây nữa, defer sẽ lo việc đó!
+		if rbErr := txx.Rollback(context.Background()); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+			return fmt.Errorf("%w: %v; original error: %v", ErrRollbackFailed, rbErr, err)
+		}
 		return err
 	}
 
 	// 5. Chốt hạ Transaction
 	if err := txx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit tx: %w", err)
+		return fmt.Errorf("%w: %v", ErrCommitFailed, err)
 	}
 
 	return nil

@@ -42,7 +42,7 @@ const (
 	queryRevokeSession = `
 		UPDATE user_sessions 
 		SET revoked_at = COALESCE(revoked_at, $2)
-		WHERE id = $1 AND revoked_at IS NULL AND expires_at > $3
+		WHERE id = $1 AND revoked_at IS NULL AND expires_at > $3 AND user_id = $4
 	`
 
 	queryRevokeAllByUserID = `
@@ -107,10 +107,10 @@ func (r *SessionRepository) ListActiveByUserID(ctx context.Context, userID int64
 	return sessions, nil
 }
 
-func (r *SessionRepository) Revoke(ctx context.Context, id int64, revokedAt time.Time) error {
+func (r *SessionRepository) Revoke(ctx context.Context, id int64, userID int64, revokedAt time.Time) error {
 	executor := tx.GetExecutor(ctx, r.pool)
 
-	result, err := executor.Exec(ctx, queryRevokeSession, id, revokedAt, time.Now())
+	result, err := executor.Exec(ctx, queryRevokeSession, id, revokedAt, time.Now(), userID)
 	if err != nil {
 		return err
 	}

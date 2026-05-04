@@ -2,7 +2,7 @@
 
 > **Phiên bản:** v1.1  
 > **Cập nhật:** 2026-04-27  
-> **Stack:** Go (pgx/v5), PostgreSQL 15+, JWT (HS256), Bcrypt  
+> **Stack:** Go (pgx/v5), PostgreSQL 15+, JWT (HS256), Bcrypt
 
 ---
 
@@ -22,7 +22,6 @@
 12. [Error Catalogue](#12-error-catalogue)
 13. [Platform Dependencies](#13-platform-dependencies)
 14. [Ghi chú & Known Issues](#14-ghi-chú--known-issues)
-
 
 ---
 
@@ -65,18 +64,18 @@ internal/platform/auth/               ← ✅ Platform-level auth implementation
 
 ### Nguyên tắc thiết kế
 
-| Nguyên tắc | Áp dụng |
-|---|---|
-| **Domain không biết DB** | Repo interface ở domain, implementation ở infra |
-| **Transaction boundary ở App layer** | `tx.TxManager.WithinTransaction()` → `tx.GetExecutor(ctx, pool)` |
-| **Ports & Adapters** | App layer phụ thuộc vào interface (`ports/`), infra cung cấp implementation |
-| **Platform vs Module separation** | Logic không gắn business (crypto, JWT, Redis token) ở `platform/auth/`; chỉ adapters identity-specific mới ở `infra/adapters/` |
-| **Credential tách riêng** | `Credential` entity độc lập, không bao giờ serialize ra ngoài |
-| **Refresh token không lưu raw** | Chỉ lưu hash SHA-256(random hex 32 bytes) vào DB |
-| **Verification token single-use** | Redis `GetDel` đảm bảo token chỉ dùng được 1 lần |
-| **Anti-corruption boundary** | `rows.go` tách biệt DB shape khỏi domain entity |
-| **CQRS read-side** | `QueryRepository` trả view model, không qua domain entity |
-| **Clock injectable** | `ports.Clock` thay cho `time.Now()` trực tiếp → testable |
+| Nguyên tắc                           | Áp dụng                                                                                                                        |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| **Domain không biết DB**             | Repo interface ở domain, implementation ở infra                                                                                |
+| **Transaction boundary ở App layer** | `tx.TxManager.WithinTransaction()` → `tx.GetExecutor(ctx, pool)`                                                               |
+| **Ports & Adapters**                 | App layer phụ thuộc vào interface (`ports/`), infra cung cấp implementation                                                    |
+| **Platform vs Module separation**    | Logic không gắn business (crypto, JWT, Redis token) ở `platform/auth/`; chỉ adapters identity-specific mới ở `infra/adapters/` |
+| **Credential tách riêng**            | `Credential` entity độc lập, không bao giờ serialize ra ngoài                                                                  |
+| **Refresh token không lưu raw**      | Chỉ lưu hash SHA-256(random hex 32 bytes) vào DB                                                                               |
+| **Verification token single-use**    | Redis `GetDel` đảm bảo token chỉ dùng được 1 lần                                                                               |
+| **Anti-corruption boundary**         | `rows.go` tách biệt DB shape khỏi domain entity                                                                                |
+| **CQRS read-side**                   | `QueryRepository` trả view model, không qua domain entity                                                                      |
+| **Clock injectable**                 | `ports.Clock` thay cho `time.Now()` trực tiếp → testable                                                                       |
 
 ---
 
@@ -107,6 +106,7 @@ CREATE TABLE IF NOT EXISTS users (
 ```
 
 **Indexes:**
+
 ```sql
 CREATE INDEX idx_users_account_status    ON users(account_status);
 CREATE INDEX idx_users_user_type         ON users(user_type);
@@ -115,23 +115,24 @@ CREATE INDEX idx_users_email_verified_at ON users(email_verified_at);
 
 **Trigger:** `trg_users_update_updated_at` — tự động set `updated_at = NOW()` trước mỗi UPDATE.
 
-| Column | Type | Nullable | Default | Ghi chú |
-|---|---|---|---|---|
-| `id` | BIGSERIAL | NOT NULL | auto | PK |
-| `email` | VARCHAR(255) | NOT NULL | — | UNIQUE, normalized lowercase |
-| `full_name` | VARCHAR(255) | NOT NULL | — | |
-| `phone` | VARCHAR(20) | NULL | — | |
-| `user_type` | VARCHAR(30) | NOT NULL | `customer` | enum: customer, admin, operator |
-| `account_status` | VARCHAR(30) | NOT NULL | `pending_verification` | xem §4 |
-| `email_verified_at` | TIMESTAMPTZ | NULL | — | NULL = chưa verify |
-| `last_login_at` | TIMESTAMPTZ | NULL | — | |
-| `locked_reason` | VARCHAR(255) | NULL | — | |
-| `metadata` | JSONB | NULL | `{}` | Thông tin phụ trợ mở rộng |
-| `version` | BIGINT | NOT NULL | 1 | Optimistic locking |
-| `created_at` | TIMESTAMPTZ | NOT NULL | NOW() | |
-| `updated_at` | TIMESTAMPTZ | NOT NULL | NOW() | auto-trigger |
+| Column              | Type         | Nullable | Default                | Ghi chú                         |
+| ------------------- | ------------ | -------- | ---------------------- | ------------------------------- |
+| `id`                | BIGSERIAL    | NOT NULL | auto                   | PK                              |
+| `email`             | VARCHAR(255) | NOT NULL | —                      | UNIQUE, normalized lowercase    |
+| `full_name`         | VARCHAR(255) | NOT NULL | —                      |                                 |
+| `phone`             | VARCHAR(20)  | NULL     | —                      |                                 |
+| `user_type`         | VARCHAR(30)  | NOT NULL | `customer`             | enum: customer, admin, operator |
+| `account_status`    | VARCHAR(30)  | NOT NULL | `pending_verification` | xem §4                          |
+| `email_verified_at` | TIMESTAMPTZ  | NULL     | —                      | NULL = chưa verify              |
+| `last_login_at`     | TIMESTAMPTZ  | NULL     | —                      |                                 |
+| `locked_reason`     | VARCHAR(255) | NULL     | —                      |                                 |
+| `metadata`          | JSONB        | NULL     | `{}`                   | Thông tin phụ trợ mở rộng       |
+| `version`           | BIGINT       | NOT NULL | 1                      | Optimistic locking              |
+| `created_at`        | TIMESTAMPTZ  | NOT NULL | NOW()                  |                                 |
+| `updated_at`        | TIMESTAMPTZ  | NOT NULL | NOW()                  | auto-trigger                    |
 
 > ✅ **Đã đồng bộ (v1.1):** Go constants được cập nhật để khớp với DB CHECK constraint:
+>
 > - `UserStatusBanned = "locked"` (thay vì `"banned"`)
 > - `UserStatusSuspended = "disabled"` (thay vì `"suspended"`)
 
@@ -152,14 +153,14 @@ CREATE TABLE IF NOT EXISTS user_credentials (
 );
 ```
 
-| Column | Type | Nullable | Default | Ghi chú |
-|---|---|---|---|---|
-| `user_id` | BIGINT | NOT NULL | — | PK + FK → users(id) ON DELETE CASCADE |
-| `password_hash` | TEXT | NOT NULL | — | bcrypt/argon2id hash, NEVER log |
-| `password_algo` | VARCHAR(30) | NOT NULL | `argon2id` | Hỗ trợ mở rộng thuật toán |
-| `password_changed_at` | TIMESTAMPTZ | NOT NULL | NOW() | Dùng invalidate old sessions |
-| `failed_login_count` | INT | NOT NULL | 0 | Brute-force protection counter |
-| `last_failed_login_at` | TIMESTAMPTZ | NULL | — | |
+| Column                 | Type        | Nullable | Default    | Ghi chú                               |
+| ---------------------- | ----------- | -------- | ---------- | ------------------------------------- |
+| `user_id`              | BIGINT      | NOT NULL | —          | PK + FK → users(id) ON DELETE CASCADE |
+| `password_hash`        | TEXT        | NOT NULL | —          | bcrypt/argon2id hash, NEVER log       |
+| `password_algo`        | VARCHAR(30) | NOT NULL | `argon2id` | Hỗ trợ mở rộng thuật toán             |
+| `password_changed_at`  | TIMESTAMPTZ | NOT NULL | NOW()      | Dùng invalidate old sessions          |
+| `failed_login_count`   | INT         | NOT NULL | 0          | Brute-force protection counter        |
+| `last_failed_login_at` | TIMESTAMPTZ | NULL     | —          |                                       |
 
 ---
 
@@ -187,19 +188,19 @@ CREATE TABLE IF NOT EXISTS user_devices (
 
 **Trigger:** `trg_user_devices_update_updated_at`
 
-| Column | Type | Nullable | Default | Ghi chú |
-|---|---|---|---|---|
-| `id` | BIGSERIAL | NOT NULL | auto | PK |
-| `user_id` | BIGINT | NOT NULL | — | FK → users(id) |
-| `fingerprint_hash` | TEXT | NOT NULL | — | Hash của device fingerprint |
-| `device_label` | VARCHAR(255) | NULL | — | Tên hiển thị device |
-| `first_seen_at` | TIMESTAMPTZ | NOT NULL | now() | Lần đầu xuất hiện |
-| `last_seen_at` | TIMESTAMPTZ | NOT NULL | now() | Lần cuối hoạt động |
-| `revoked_at` | TIMESTAMPTZ | NULL | — | NULL = chưa bị thu hồi |
-| `revoked_reason` | VARCHAR(255) | NULL | — | |
-| `metadata` | JSONB | NOT NULL | `{}` | |
-| `created_at` | TIMESTAMPTZ | NOT NULL | now() | |
-| `updated_at` | TIMESTAMPTZ | NOT NULL | now() | auto-trigger |
+| Column             | Type         | Nullable | Default | Ghi chú                     |
+| ------------------ | ------------ | -------- | ------- | --------------------------- |
+| `id`               | BIGSERIAL    | NOT NULL | auto    | PK                          |
+| `user_id`          | BIGINT       | NOT NULL | —       | FK → users(id)              |
+| `fingerprint_hash` | TEXT         | NOT NULL | —       | Hash của device fingerprint |
+| `device_label`     | VARCHAR(255) | NULL     | —       | Tên hiển thị device         |
+| `first_seen_at`    | TIMESTAMPTZ  | NOT NULL | now()   | Lần đầu xuất hiện           |
+| `last_seen_at`     | TIMESTAMPTZ  | NOT NULL | now()   | Lần cuối hoạt động          |
+| `revoked_at`       | TIMESTAMPTZ  | NULL     | —       | NULL = chưa bị thu hồi      |
+| `revoked_reason`   | VARCHAR(255) | NULL     | —       |                             |
+| `metadata`         | JSONB        | NOT NULL | `{}`    |                             |
+| `created_at`       | TIMESTAMPTZ  | NOT NULL | now()   |                             |
+| `updated_at`       | TIMESTAMPTZ  | NOT NULL | now()   | auto-trigger                |
 
 **Lưu ý:** Composite UNIQUE `(user_id, fingerprint_hash)` tự động tạo composite index — không cần index riêng cho `user_id`.  
 **Policy:** Tối đa **5 devices** active per user (`DevicePolicy.MaxDevicesPerUser = 5`).
@@ -232,6 +233,7 @@ CREATE TABLE IF NOT EXISTS user_sessions (
 ```
 
 **Indexes:**
+
 ```sql
 CREATE INDEX idx_user_sessions_id_status ON user_sessions(user_id, session_status);
 CREATE INDEX idx_user_sessions_expires_at ON user_sessions(expires_at);
@@ -239,21 +241,21 @@ CREATE INDEX idx_user_sessions_expires_at ON user_sessions(expires_at);
 
 **Trigger:** `trg_user_sessions_update_updated_at`
 
-| Column | Type | Nullable | Default | Ghi chú |
-|---|---|---|---|---|
-| `id` | BIGSERIAL | NOT NULL | auto | PK |
-| `user_id` | BIGINT | NOT NULL | — | FK → users(id) |
-| `device_id` | BIGINT | NULL | — | FK → user_devices(id) ON DELETE SET NULL |
-| `refresh_token_hash` | TEXT | NOT NULL | — | SHA-256 hash, UNIQUE |
-| `session_status` | VARCHAR(20) | NOT NULL | `active` | active / revoked / expired |
-| `expires_at` | TIMESTAMPTZ | NOT NULL | — | Thời điểm hết hạn session |
-| `ip_address` | INET | NULL | — | IP của client |
-| `user_agent` | TEXT | NULL | — | Browser/app user agent |
-| `last_seen_at` | TIMESTAMPTZ | NOT NULL | NOW() | |
-| `revoked_at` | TIMESTAMPTZ | NULL | — | NULL = chưa bị thu hồi |
-| `revoked_reason` | VARCHAR(255) | NULL | — | |
-| `created_at` | TIMESTAMPTZ | NOT NULL | NOW() | |
-| `updated_at` | TIMESTAMPTZ | NOT NULL | NOW() | auto-trigger |
+| Column               | Type         | Nullable | Default  | Ghi chú                                  |
+| -------------------- | ------------ | -------- | -------- | ---------------------------------------- |
+| `id`                 | BIGSERIAL    | NOT NULL | auto     | PK                                       |
+| `user_id`            | BIGINT       | NOT NULL | —        | FK → users(id)                           |
+| `device_id`          | BIGINT       | NULL     | —        | FK → user_devices(id) ON DELETE SET NULL |
+| `refresh_token_hash` | TEXT         | NOT NULL | —        | SHA-256 hash, UNIQUE                     |
+| `session_status`     | VARCHAR(20)  | NOT NULL | `active` | active / revoked / expired               |
+| `expires_at`         | TIMESTAMPTZ  | NOT NULL | —        | Thời điểm hết hạn session                |
+| `ip_address`         | INET         | NULL     | —        | IP của client                            |
+| `user_agent`         | TEXT         | NULL     | —        | Browser/app user agent                   |
+| `last_seen_at`       | TIMESTAMPTZ  | NOT NULL | NOW()    |                                          |
+| `revoked_at`         | TIMESTAMPTZ  | NULL     | —        | NULL = chưa bị thu hồi                   |
+| `revoked_reason`     | VARCHAR(255) | NULL     | —        |                                          |
+| `created_at`         | TIMESTAMPTZ  | NOT NULL | NOW()    |                                          |
+| `updated_at`         | TIMESTAMPTZ  | NOT NULL | NOW()    | auto-trigger                             |
 
 **Session lifetime:** Rotate mỗi lần refresh → `expires_at += 30 ngày` (xem `Session.Rotate()`).
 
@@ -282,6 +284,7 @@ CREATE TABLE IF NOT EXISTS addresses (
 ```
 
 **Indexes:**
+
 ```sql
 CREATE INDEX idx_addresses_user_id ON addresses(user_id);
 -- Đảm bảo mỗi user chỉ có 1 địa chỉ mặc định
@@ -290,21 +293,21 @@ CREATE UNIQUE INDEX idx_addresses_unique_default ON addresses(user_id) WHERE is_
 
 **Trigger:** `trg_addresses_update_updated_at`
 
-| Column | Type | Nullable | Default | Ghi chú |
-|---|---|---|---|---|
-| `id` | BIGSERIAL | NOT NULL | auto | PK |
-| `user_id` | BIGINT | NOT NULL | — | FK → users(id) |
-| `address_line1` | VARCHAR(255) | NOT NULL | — | Số nhà, tên đường |
-| `address_line2` | VARCHAR(255) | NULL | — | Tầng, phòng... |
-| `province_code` | VARCHAR(20) | NOT NULL | — | Mã tỉnh/thành |
-| `district_code` | VARCHAR(20) | NOT NULL | — | Mã quận/huyện |
-| `ward_code` | VARCHAR(20) | NOT NULL | — | Mã phường/xã |
-| `postal_code` | VARCHAR(10) | NULL | — | |
-| `country_code` | VARCHAR(10) | NOT NULL | `VN` | ISO 3166-1 alpha-2 |
-| `is_default` | BOOLEAN | NOT NULL | false | Partial unique index → max 1 default/user |
-| `version` | BIGINT | NOT NULL | 1 | Optimistic locking |
-| `created_at` | TIMESTAMPTZ | NOT NULL | NOW() | |
-| `updated_at` | TIMESTAMPTZ | NOT NULL | NOW() | auto-trigger |
+| Column          | Type         | Nullable | Default | Ghi chú                                   |
+| --------------- | ------------ | -------- | ------- | ----------------------------------------- |
+| `id`            | BIGSERIAL    | NOT NULL | auto    | PK                                        |
+| `user_id`       | BIGINT       | NOT NULL | —       | FK → users(id)                            |
+| `address_line1` | VARCHAR(255) | NOT NULL | —       | Số nhà, tên đường                         |
+| `address_line2` | VARCHAR(255) | NULL     | —       | Tầng, phòng...                            |
+| `province_code` | VARCHAR(20)  | NOT NULL | —       | Mã tỉnh/thành                             |
+| `district_code` | VARCHAR(20)  | NOT NULL | —       | Mã quận/huyện                             |
+| `ward_code`     | VARCHAR(20)  | NOT NULL | —       | Mã phường/xã                              |
+| `postal_code`   | VARCHAR(10)  | NULL     | —       |                                           |
+| `country_code`  | VARCHAR(10)  | NOT NULL | `VN`    | ISO 3166-1 alpha-2                        |
+| `is_default`    | BOOLEAN      | NOT NULL | false   | Partial unique index → max 1 default/user |
+| `version`       | BIGINT       | NOT NULL | 1       | Optimistic locking                        |
+| `created_at`    | TIMESTAMPTZ  | NOT NULL | NOW()   |                                           |
+| `updated_at`    | TIMESTAMPTZ  | NOT NULL | NOW()   | auto-trigger                              |
 
 ---
 
@@ -346,13 +349,13 @@ type User struct {
 
 **Domain methods:**
 
-| Method | Mô tả |
-|---|---|
-| `IsEmailVerified() bool` | Email đã được xác minh? |
-| `CanPerformDigitalActions() error` | Gate check — yêu cầu email đã verify |
+| Method                                   | Mô tả                                                        |
+| ---------------------------------------- | ------------------------------------------------------------ |
+| `IsEmailVerified() bool`                 | Email đã được xác minh?                                      |
+| `CanPerformDigitalActions() error`       | Gate check — yêu cầu email đã verify                         |
 | `MarkEmailVerified(now time.Time) error` | Idempotent — set `EmailVerifiedAt`, chuyển status → `active` |
-| `Suspend() error` | Chuyển sang `suspended` nếu state machine cho phép |
-| `Ban() error` | Chuyển sang `banned` — terminal state |
+| `Suspend() error`                        | Chuyển sang `suspended` nếu state machine cho phép           |
+| `Ban() error`                            | Chuyển sang `banned` — terminal state                        |
 
 ---
 
@@ -373,10 +376,10 @@ type Credential struct {
 
 **Domain methods:**
 
-| Method | Mô tả |
-|---|---|
+| Method                                           | Mô tả                                 |
+| ------------------------------------------------ | ------------------------------------- |
 | `IsPasswordChangeRequired(now, maxAgeDays) bool` | Kiểm tra password quá hạn theo policy |
-| `MarkPasswordChanged(newHash, algo, now)` | Cập nhật hash + timestamp |
+| `MarkPasswordChanged(newHash, algo, now)`        | Cập nhật hash + timestamp             |
 
 ---
 
@@ -400,12 +403,12 @@ type Device struct {
 
 **Domain methods:**
 
-| Method | Mô tả |
-|---|---|
-| `IsRevoked() bool` | Device đã bị thu hồi? |
-| `Revoke(now) error` | Idempotent revoke |
+| Method                          | Mô tả                                      |
+| ------------------------------- | ------------------------------------------ |
+| `IsRevoked() bool`              | Device đã bị thu hồi?                      |
+| `Revoke(now) error`             | Idempotent revoke                          |
 | `AssertOwnership(userID) error` | Enforce ownership — gọi trước mọi mutation |
-| `UpdateLastSeen(now)` | Cập nhật `last_seen_at` |
+| `UpdateLastSeen(now)`           | Cập nhật `last_seen_at`                    |
 
 ---
 
@@ -431,12 +434,12 @@ type Session struct {
 
 **Domain methods:**
 
-| Method | Mô tả |
-|---|---|
-| `IsRevoked() bool` | Session bị revoke chưa? |
+| Method                          | Mô tả                                        |
+| ------------------------------- | -------------------------------------------- |
+| `IsRevoked() bool`              | Session bị revoke chưa?                      |
 | `IsExpired(now time.Time) bool` | So sánh với `now` được inject vào — testable |
-| `Revoke(now)` | Idempotent revoke |
-| `Rotate(newHash, now)` | Cập nhật hash + gia hạn 30 ngày |
+| `Revoke(now)`                   | Idempotent revoke                            |
+| `Rotate(newHash, now)`          | Cập nhật hash + gia hạn 30 ngày              |
 
 ---
 
@@ -462,8 +465,8 @@ type Address struct {
 
 **Domain methods:**
 
-| Method | Mô tả |
-|---|---|
+| Method                          | Mô tả                                     |
+| ------------------------------- | ----------------------------------------- |
 | `AssertOwnership(userID) error` | Enforce ownership boundary trước mutation |
 
 ---
@@ -490,14 +493,15 @@ pending_verification ──→ active ──→ suspended ──→ active
                                      suspended ──→ banned
 ```
 
-| DB Value | Hằng số Go | Mô tả |
-|---|---|---|
+| DB Value               | Hằng số Go                      | Mô tả                                   |
+| ---------------------- | ------------------------------- | --------------------------------------- |
 | `pending_verification` | `UserStatusPendingVerification` | Mặc định khi đăng ký, chưa verify email |
-| `active` | `UserStatusActive` | Đã verify, hoạt động bình thường |
-| `disabled` | `UserStatusSuspended` | Bị khoá tạm thời |
-| `locked` | `UserStatusBanned` | Cấm vĩnh viễn — KHÔNG thể hoàn tác |
+| `active`               | `UserStatusActive`              | Đã verify, hoạt động bình thường        |
+| `disabled`             | `UserStatusSuspended`           | Bị khoá tạm thời                        |
+| `locked`               | `UserStatusBanned`              | Cấm vĩnh viễn — KHÔNG thể hoàn tác      |
 
 **CanLogin rules:**
+
 - `active` → ✅ có thể login
 - `pending_verification` → ✅ có thể login (nhưng bị hạn chế digital actions)
 - `disabled` / `locked` → ❌ không thể login
@@ -510,16 +514,18 @@ pending_verification ──→ active ──→ suspended ──→ active
 
 ### 5.1 `RegisterPolicy`
 
-| Setting | Giá trị |
-|---|---|
-| `MinPassLength` | 8 |
-| `MaxPassLength` | 72 |
+| Setting         | Giá trị |
+| --------------- | ------- |
+| `MinPassLength` | 8       |
+| `MaxPassLength` | 72      |
 
 **`ValidatePassword(password) error`**
+
 - Kiểm tra độ dài: `[8, 72]`
 - Bắt buộc có: ít nhất 1 chữ HOA, 1 chữ thường, 1 chữ số
 
 **`ValidateRegistration(email, password) error`**
+
 - Email không được rỗng
 - Gọi `ValidatePassword`
 
@@ -527,15 +533,17 @@ pending_verification ──→ active ──→ suspended ──→ active
 
 ### 5.2 `DevicePolicy`
 
-| Setting | Giá trị |
-|---|---|
-| `MaxDevicesPerUser` | 5 |
-| `MaxSessionTTL` | 30 (ngày) |
+| Setting             | Giá trị   |
+| ------------------- | --------- |
+| `MaxDevicesPerUser` | 5         |
+| `MaxSessionTTL`     | 30 (ngày) |
 
 **`CanRegisterNewDevice(activeDevices) error`**
+
 - Trả `ErrDeviceLimitReached` nếu số device active ≥ 5
 
 **`MaxSessionTTL` usage:**
+
 ```go
 ExpiredAt: now.Add(time.Duration(s.devicePolicy.MaxSessionTTL) * 24 * time.Hour)
 ```
@@ -561,13 +569,13 @@ type UserRepository interface {
 
 **SQL queries key:**
 
-| Method | Query pattern |
-|---|---|
-| `GetByID` | `SELECT ... FROM users WHERE id = $1` |
-| `GetByEmail` | `SELECT ... FROM users WHERE email = $1` |
-| `ExistsByEmail` | `SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)` |
-| `Insert` | `INSERT INTO users (...) VALUES (...) RETURNING id` |
-| `UpdateStatus` | `UPDATE users SET account_status = $1 WHERE id = $2` |
+| Method              | Query pattern                                                  |
+| ------------------- | -------------------------------------------------------------- |
+| `GetByID`           | `SELECT ... FROM users WHERE id = $1`                          |
+| `GetByEmail`        | `SELECT ... FROM users WHERE email = $1`                       |
+| `ExistsByEmail`     | `SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)`          |
+| `Insert`            | `INSERT INTO users (...) VALUES (...) RETURNING id`            |
+| `UpdateStatus`      | `UPDATE users SET account_status = $1 WHERE id = $2`           |
 | `MarkEmailVerified` | Idempotent COALESCE update + tự động active nếu lần đầu verify |
 
 ---
@@ -599,6 +607,7 @@ type SessionRepository interface {
 ```
 
 **Lưu ý:**
+
 - `Update`: cập nhật `refresh_token_hash`, `expires_at`, `last_seen_at` sau khi rotate session
 - `ListActiveByUserID`: lọc `revoked_at IS NULL AND expires_at > NOW()`
 - `GetByRefreshTokenHashForUpdate`: thêm `FOR UPDATE` — dùng trong Rotate flow trong transaction
@@ -619,6 +628,7 @@ type DeviceRepository interface {
 ```
 
 **Upsert device query:**
+
 ```sql
 INSERT INTO user_devices (user_id, fingerprint_hash, device_label, first_seen_at, last_seen_at, revoked_at)
 VALUES ($1, $2, $3, $4, $5, $6)
@@ -730,12 +740,14 @@ type AddressView struct {
 #### UC-01: Register (Đăng ký tài khoản)
 
 **Input:**
+
 - `email: string`
 - `password: string`
 - `full_name: string`
 - `phone?: string`
 
 **Flow:**
+
 1. `RegisterPolicy.ValidateRegistration(email, password)` — validate input
 2. `UserRepository.ExistsByEmail(email)` — check trùng email
 3. `PasswordHasher.Hash(ctx, password)` — hash bằng bcrypt
@@ -753,6 +765,7 @@ type AddressView struct {
 #### UC-02: Login (Đăng nhập)
 
 **Input:**
+
 - `email: string`
 - `password: string`
 - `device_fingerprint?: string`
@@ -761,6 +774,7 @@ type AddressView struct {
 - `user_agent: string`
 
 **Flow:**
+
 1. `UserRepository.GetByEmail(email)`
 2. Kiểm tra `UserStatus.CanLogin()`
 3. `CredentialRepository.GetByUserID(userID)`
@@ -781,9 +795,11 @@ type AddressView struct {
 #### UC-03: Refresh Token
 
 **Input:**
+
 - `refresh_token: string` (raw)
 
 **Flow:**
+
 1. `hashToken(rawRefreshToken)` → SHA-256 hex
 2. `tx.TxManager.WithinTransaction`:
    - `SessionRepository.GetByRefreshTokenHashForUpdate(hash)` — `SELECT FOR UPDATE` chống race condition
@@ -801,6 +817,7 @@ type AddressView struct {
 **Input:** `session_id: int64` (từ JWT claims hoặc query param)
 
 **Flow:**
+
 1. `SessionRepository.Revoke(id, now)`
 2. Optionally: `DeviceRepository.Revoke(device_id, now)` nếu user muốn đăng xuất khỏi device
 
@@ -811,6 +828,7 @@ type AddressView struct {
 **Input:** `token: string` (email verification token)
 
 **Flow:**
+
 1. Validate và decode token (Redis/JWT)
 2. Extract `user_id` từ token
 3. `UserRepository.MarkEmailVerified(user_id, now)` — idempotent
@@ -830,6 +848,7 @@ type AddressView struct {
 ## 9. Port Adapters
 
 Sau khi tái cấu trúc (v1.2), các implementation được phân chia theo nguyên tắc:
+
 - **`platform/auth/`**: logic không gắn domain bất kỳ (crypto, JWT, Redis token)
 - **`identity/infra/adapters/`**: adapters identity-specific + thin bridge wrappers
 
@@ -843,10 +862,10 @@ func (h *BcryptHasher) Hash(ctx context.Context, raw string) (string, error)
 func (h *BcryptHasher) Verify(ctx context.Context, raw, hash string) error
 ```
 
-| Chi tiết | Giá trị |
-|---|---|
-| Thuật toán | bcrypt |
-| Cost | Lấy từ `config.JWT.BcryptCost` (mặc định: 12) |
+| Chi tiết          | Giá trị                                                                      |
+| ----------------- | ---------------------------------------------------------------------------- |
+| Thuật toán        | bcrypt                                                                       |
+| Cost              | Lấy từ `config.JWT.BcryptCost` (mặc định: 12)                                |
 | Structural typing | `*BcryptHasher` satisfy `ports.PasswordHasher` trực tiếp — không cần adapter |
 
 ---
@@ -864,12 +883,12 @@ func (m *JWTTokenManager) GenerateAccessToken(ctx, claims JWTClaims) (string, ti
 func (m *JWTTokenManager) GenerateRefreshToken(ctx, userID int64) (string, error)
 ```
 
-| Chi tiết | Giá trị |
-|---|---|
-| Access token | HS256 JWT, claim: `user_id`, `email`, `role`, `type="access"` |
-| Access TTL | `config.JWT.AccessTokenTTL` (mặc định: 15 phút) |
-| Refresh token | **Opaque** random hex 32 bytes (không phải JWT) |
-| Bridge layer | `jwtTokenManagerBridge` trong `adapters/provider.go` — convert `ports.AccessTokenClaims` → `auth.JWTClaims` |
+| Chi tiết      | Giá trị                                                                                                     |
+| ------------- | ----------------------------------------------------------------------------------------------------------- |
+| Access token  | HS256 JWT, claim: `user_id`, `email`, `role`, `type="access"`                                               |
+| Access TTL    | `config.JWT.AccessTokenTTL` (mặc định: 15 phút)                                                             |
+| Refresh token | **Opaque** random hex 32 bytes (không phải JWT)                                                             |
+| Bridge layer  | `jwtTokenManagerBridge` trong `adapters/provider.go` — convert `ports.AccessTokenClaims` → `auth.JWTClaims` |
 
 > **Tại sao cần bridge?** `platform/auth` không được import `identity/app/ports` (vi phạm layering). `JWTClaims` và `ports.AccessTokenClaims` có cùng fields, `jwtTokenManagerBridge` trong adapters chuyển đổi giữa hai kiểu.
 
@@ -895,12 +914,12 @@ func (s *RedisVerificationTokenService) IssueEmailVerificationToken(ctx, userID 
 func (s *RedisVerificationTokenService) ParseEmailVerificationToken(ctx, token string) (int64, error)
 ```
 
-| Chi tiết | Giá trị |
-|---|---|
-| Token | Random hex 32 bytes (dùng `generateSecureToken()` từ `platform/auth/rand.go`) |
-| Storage | Redis key: `identity:email_verify:{token}` |
-| TTL | 24 giờ |
-| Single-use | `GetDel` — lấy và xóa trong cùng 1 thác tác → chống replay attack |
+| Chi tiết          | Giá trị                                                                             |
+| ----------------- | ----------------------------------------------------------------------------------- |
+| Token             | Random hex 32 bytes (dùng `generateSecureToken()` từ `platform/auth/rand.go`)       |
+| Storage           | Redis key: `identity:email_verify:{token}`                                          |
+| TTL               | 24 giờ                                                                              |
+| Single-use        | `GetDel` — lấy và xóa trong cùng 1 thác tác → chống replay attack                   |
 | Structural typing | `*RedisVerificationTokenService` satisfy `ports.VerificationTokenService` trực tiếp |
 
 ---
@@ -1037,19 +1056,19 @@ internal/bootstrap/providers.go
 
 Tất cả lỗi domain được định nghĩa trong `domain/error/errors.go`:
 
-| Error Code | HTTP Mapping | Mô tả |
-|---|---|---|
-| `IDENTITY_USER_NOT_FOUND` | 404 | Không tìm thấy user |
-| `IDENTITY_EMAIL_ALREADY_EXIST` | 409 | Email đã tồn tại |
-| `IDENTITY_INVALID_CREDENTIALS` | 401 | Sai email hoặc mật khẩu |
-| `IDENTITY_EMAIL_NOT_VERIFIED` | 403 | Email chưa được xác minh |
-| `IDENTITY_SESSION_EXPIRED` | 401 | Session đã hết hạn |
-| `IDENTITY_SESSION_REVOKED` | 401 | Session đã bị thu hồi |
-| `IDENTITY_DEVICE_LIMIT` | 422 | Đã đạt giới hạn số device (5) |
-| `IDENTITY_DEVICE_NOT_OWNED` | 403 | Device không thuộc user này |
-| `IDENTITY_ADDRESS_NOT_FOUND` | 404 | Địa chỉ không tồn tại |
-| `IDENTITY_ADDRESS_NOT_OWNED` | 403 | Địa chỉ không thuộc user này |
-| `IDENTITY_INVALID_STATUS_TRANSITION` | 422 | Chuyển trạng thái user không hợp lệ |
+| Error Code                           | HTTP Mapping | Mô tả                               |
+| ------------------------------------ | ------------ | ----------------------------------- |
+| `IDENTITY_USER_NOT_FOUND`            | 404          | Không tìm thấy user                 |
+| `IDENTITY_EMAIL_ALREADY_EXIST`       | 409          | Email đã tồn tại                    |
+| `IDENTITY_INVALID_CREDENTIALS`       | 401          | Sai email hoặc mật khẩu             |
+| `IDENTITY_EMAIL_NOT_VERIFIED`        | 403          | Email chưa được xác minh            |
+| `IDENTITY_SESSION_EXPIRED`           | 401          | Session đã hết hạn                  |
+| `IDENTITY_SESSION_REVOKED`           | 401          | Session đã bị thu hồi               |
+| `IDENTITY_DEVICE_LIMIT`              | 422          | Đã đạt giới hạn số device (5)       |
+| `IDENTITY_DEVICE_NOT_OWNED`          | 403          | Device không thuộc user này         |
+| `IDENTITY_ADDRESS_NOT_FOUND`         | 404          | Địa chỉ không tồn tại               |
+| `IDENTITY_ADDRESS_NOT_OWNED`         | 403          | Địa chỉ không thuộc user này        |
+| `IDENTITY_INVALID_STATUS_TRANSITION` | 422          | Chuyển trạng thái user không hợp lệ |
 
 ---
 
@@ -1057,15 +1076,16 @@ Tất cả lỗi domain được định nghĩa trong `domain/error/errors.go`:
 
 Module identity phụ thuộc vào các platform packages:
 
-| Package | Vai trò |
-|---|---|
-| `platform/auth` | `*auth.Auth` giữ cho HTTP middleware — validate access token |
-| `platform/tx` | `TxManager` interface + `*Manager` impl + `GetExecutor(ctx, pool)` |
-| `platform/db` | pgxpool connection pool |
-| `platform/redis` | `*goredis.Client` — dùng cho verification token (Redis) |
-| `platform/config` | JWT config (secret, AccessTokenTTL, RefreshTokenTTL, BcryptCost) |
+| Package           | Vai trò                                                            |
+| ----------------- | ------------------------------------------------------------------ |
+| `platform/auth`   | `*auth.Auth` giữ cho HTTP middleware — validate access token       |
+| `platform/tx`     | `TxManager` interface + `*Manager` impl + `GetExecutor(ctx, pool)` |
+| `platform/db`     | pgxpool connection pool                                            |
+| `platform/redis`  | `*goredis.Client` — dùng cho verification token (Redis)            |
+| `platform/config` | JWT config (secret, AccessTokenTTL, RefreshTokenTTL, BcryptCost)   |
 
 **Token lifetimes:**
+
 - Access token TTL: env `JWT_ACCESS_TOKEN_TTL_MINUTES` (mặc định: 15 phút) ✅
 - Session TTL: `DevicePolicy.MaxSessionTTL` × 24h (mặc định: **30 ngày**)
 
@@ -1075,12 +1095,12 @@ Module identity phụ thuộc vào các platform packages:
 
 ### ⚠️ Tồn động cần xử lý
 
-| # | Vị trí | Vấn đề | Mức độ |
-|---|---|---|---|
-| 1 | `query_repo.go` `queryMe` | SELECT thiếu các cột `phone`, `user_type`, `locked_reason`, `metadata`, `version`, `last_login_at` so với `scanUser` | **MEDIUM** |
-| 2 | `auth.go` `*auth.Auth` | Chỉ giữ lại để HTTP middleware validate access token — không còn dùng trong service | INFO |
-| 3 | `http/` | HTTP handlers chưa implement | **HIGH** |
-| 4 | `EventPublisher` | Phase 1 chỉ log — chưa gửi email thật cho user | **HIGH** |
+| #   | Vị trí                    | Vấn đề                                                                                                               | Mức độ     |
+| --- | ------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------- |
+| 1   | `query_repo.go` `queryMe` | SELECT thiếu các cột `phone`, `user_type`, `locked_reason`, `metadata`, `version`, `last_login_at` so với `scanUser` | **MEDIUM** |
+| 2   | `auth.go` `*auth.Auth`    | Chỉ giữ lại để HTTP middleware validate access token — không còn dùng trong service                                  | INFO       |
+| 3   | `http/`                   | HTTP handlers chưa implement                                                                                         | **HIGH**   |
+| 4   | `EventPublisher`          | Phase 1 chỉ log — chưa gửi email thật cho user                                                                       | **HIGH**   |
 
 ### 📌 Việc cần làm tiếp theo
 
@@ -1109,3 +1129,65 @@ http/
 - Partial unique index cho default address
 - Ownership enforcement (`AssertOwnership`) trước mọi mutation
 - Wire DI đầy đủ (PlatformSet + ModuleSet)
+
+bookstore-backend-v2/internal/modules/identity/
+│
+├── domain/ # 1. TẦNG CỐT LÕI (CORE) - Bất biến, không phụ thuộc framework
+│ ├── entity/ # Các thực thể mang dữ liệu và trạng thái
+│ │ ├── user.go  
+│ │ ├── credential.go  
+│ │ ├── session.go  
+│ │ ├── device.go  
+│ │ └── address.go  
+│ ├── value_object/ # Các kiểu dữ liệu ràng buộc nghiệp vụ
+│ │ ├── email.go  
+│ │ └── user_status.go  
+│ ├── policy/ # Luật nghiệp vụ (Business Rules)
+│ │ ├── register_policy.go  
+│ │ └── device_policy.go  
+│ ├── error/ # Mã lỗi chuẩn hóa của riêng module
+│ │ └── errors.go  
+│ └── repository.go # CÁC INTERFACE ĐỂ GHI (Write-side contracts)
+│
+├── app/ # 2. TẦNG ĐIỀU PHỐI (APPLICATION) - Orchestration & Use Cases
+│ ├── command/ # Định nghĩa Input cho thao tác GHI
+│ │ ├── register_command.go  
+│ │ ├── login_command.go  
+│ │ └── refresh_command.go  
+│ ├── query/ # Định nghĩa Input/Output & Interface cho thao tác ĐỌC (CQRS-lite)
+│ │ ├── query_repository.go  
+│ │ └── views.go # (MeView, SessionView, DeviceView...)
+│ ├── dto/ # Data Transfer Objects trả về cho HTTP
+│ │ ├── register_output.go  
+│ │ └── login_output.go  
+│ ├── ports/ # CÁC INTERFACE YÊU CẦU NGOẠI VI (Outbound Ports)
+│ │ ├── token_manager.go  
+│ │ ├── password_hasher.go  
+│ │ └── event_publisher.go  
+│ └── service/ # Kẻ nhạc trưởng điều phối nghiệp vụ
+│ ├── auth_service.go  
+│ ├── user_service.go  
+│ └── providers.go # (Wire ProviderSet cho tầng App)
+│
+├── infra/ # 3. TẦNG HẠ TẦNG (INFRASTRUCTURE) - Các Implementation thực tế
+│ ├── postgres/ # Giao tiếp với DB (Sử dụng pgx)
+│ │ ├── user_repository.go  
+│ │ ├── session_repository.go
+│ │ ├── device_repository.go
+│ │ ├── address_repository.go
+│ │ ├── query_repository.go # Cắm thẳng SQL để lấy View tối ưu đọc
+│ │ ├── mapper.go # Map từ DB row -> Entity / View
+│ │ └── providers.go # (Wire ProviderSet cho DB)
+│ └── adapter/ # Các công cụ bên thứ 3 (Thợ xây đắp ứng dụng)
+│ ├── redis_verify_token.go# Implement VerificationTokenService
+│ ├── bcrypt_hasher.go # Implement PasswordHasher
+│ ├── jwt_manager.go # Implement TokenManager
+│ └── providers.go # (Wire ProviderSet cho Adapter)
+│
+└── interfaces/ # 4. TẦNG GIAO TIẾP NGOÀI (ENTRYPOINTS / INBOUND PORTS)
+├── http/ # Nhận HTTP Request từ client
+│ ├── auth_handler.go # Chuyển JSON -> Command -> gọi AuthService
+│ ├── user_handler.go  
+ │ └── routes.go # Khai báo các endpoint (/api/v1/auth/...)
+└── consumer/ # (Nếu có) Nhận event từ Kafka
+└── outbox_worker.go
