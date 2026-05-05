@@ -3,6 +3,7 @@ package bootstrap
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	identity_service "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/app/service"
@@ -13,12 +14,13 @@ import (
 	"github.com/duclm99/bookstore-backend-v2/internal/platform/config"
 	db "github.com/duclm99/bookstore-backend-v2/internal/platform/db"
 	httpx "github.com/duclm99/bookstore-backend-v2/internal/platform/httpx"
-	logger "github.com/duclm99/bookstore-backend-v2/internal/platform/logger"
-	"github.com/duclm99/bookstore-backend-v2/internal/platform/observability"
-	redis "github.com/duclm99/bookstore-backend-v2/internal/platform/redis"
-	tx "github.com/duclm99/bookstore-backend-v2/internal/platform/tx"
 	"github.com/duclm99/bookstore-backend-v2/internal/platform/idempotency"
 	"github.com/duclm99/bookstore-backend-v2/internal/platform/kafka"
+	logger "github.com/duclm99/bookstore-backend-v2/internal/platform/logger"
+	"github.com/duclm99/bookstore-backend-v2/internal/platform/observability"
+	"github.com/duclm99/bookstore-backend-v2/internal/platform/outbox"
+	redis "github.com/duclm99/bookstore-backend-v2/internal/platform/redis"
+	tx "github.com/duclm99/bookstore-backend-v2/internal/platform/tx"
 	"github.com/gin-gonic/gin"
 	"github.com/google/wire"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -114,11 +116,22 @@ func ProvideGinEngine(
 	profileHandler *identity_http.ProfileHandler,
 	addressHandler *identity_http.AddressHandler,
 	authMiddleware gin.HandlerFunc,
+	idempotencySvc idempotency.Service,
 ) *gin.Engine {
 	engine := httpx.NewRouter(cfg, log)
 
+	idempotencyMiddleware := idempotency.GinMiddleware(idempotencySvc, idempotency.MiddlewareConfig{
+		KeyHeader: "Idempotency-Key",
+		ScopeResolver: func(c *gin.Context) string {
+			arr := strings.Split(c.FullPath(), "/")
+			action := arr[len(arr)-1]
+			log.Info("middleware key", zap.String("key", "identity:"+action))
+			return "identity:" + action
+		},
+	})
+
 	// Nhúng router identity
-	identity_http.RegisterRoutes(engine, authHandler, profileHandler, addressHandler, authMiddleware)
+	identity_http.RegisterRoutes(engine, authHandler, profileHandler, addressHandler, authMiddleware, idempotencyMiddleware)
 
 	return engine
 }
@@ -153,6 +166,7 @@ var PlatformSet = wire.NewSet(
 	kafka.ProviderSet,
 	ProvideIdempotencyDBTX,
 	idempotency.ProviderSet,
+	outbox.ProviderSet,
 )
 
 var HTTPSet = wire.NewSet(

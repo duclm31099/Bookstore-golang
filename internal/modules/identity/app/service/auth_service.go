@@ -97,6 +97,7 @@ func (s *AuthService) Register(ctx context.Context, cmd command.RegisterCommand)
 		UserType:        "customer",
 		Status:          value_object.UserStatusPendingVerification,
 		EmailVerifiedAt: nil,
+		Version:         1,
 	}
 	credential := &entity.Credential{
 		PasswordHash:      hashedPassword,
@@ -115,12 +116,11 @@ func (s *AuthService) Register(ctx context.Context, cmd command.RegisterCommand)
 			return err
 		}
 
-		verifyToken, err := s.verifyTokenSvc.IssueEmailVerificationToken(ctx, user.ID)
+		verifyToken, err := s.verifyTokenSvc.IssueEmailVerificationToken(txCtx, user.ID)
 		if err != nil {
 			return err
 		}
-
-		if err := s.eventPublisher.PublishUserRegistered(ctx, ports.UserRegisteredPayload{
+		if err := s.eventPublisher.PublishUserRegistered(txCtx, ports.UserRegisteredPayload{
 			UserID: user.ID,
 			Email:  user.Email.String(),
 			Token:  verifyToken,

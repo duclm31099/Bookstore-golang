@@ -8,12 +8,13 @@ func RegisterRoutes(
 	profileHandler *ProfileHandler,
 	addressHandler *AddressHandler,
 	authMiddleware gin.HandlerFunc,
+	idempotencyMiddleware gin.HandlerFunc,
 ) {
 	api := r.Group("/api/v1")
 
 	auth := api.Group("/auth")
 	{
-		auth.POST("/register", authHandler.Register)
+		auth.POST("/register", idempotencyMiddleware, authHandler.Register)
 		auth.POST("/login", authHandler.Login)
 		auth.POST("/refresh", authHandler.RefreshToken)
 		auth.POST("/verify-email", authHandler.VerifyEmail)

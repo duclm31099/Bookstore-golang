@@ -3,6 +3,7 @@ package idempotency
 import (
 	"bytes"
 	"io"
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -24,37 +25,51 @@ func GinMiddleware(svc Service, cfg MiddlewareConfig) gin.HandlerFunc {
 	}
 
 	return func(c *gin.Context) {
+		// 1. Lấy idempotency key từ header
 		rawKey := c.GetHeader(keyHeader)
+		// 2. Lấy scope từ config hoặc sử dụng default
 		scope := "default"
 		if cfg.ScopeResolver != nil {
+			log.Println("Scope resolver is not nil")
 			scope = cfg.ScopeResolver(c)
+			log.Println("Scope::", scope)
 		}
 
+		// 3. Check idempotency key from header is exists
 		if rawKey == "" {
 			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
 				"error": ErrMissingKey.Error(),
 			})
 			return
 		}
+		newCtx := WithIdempotencyKey(c.Request.Context(), rawKey)
+		c.Request = c.Request.WithContext(newCtx) // Ghi đè lại context của Gin
 
+		// 4. Read body
 		var body []byte
 		if c.Request.Body != nil {
 			body, _ = io.ReadAll(c.Request.Body)
 			c.Request.Body = io.NopCloser(bytes.NewBuffer(body))
+			log.Println("Body::", string(body))
 		}
 
 		var requestHash string
 		var err error
 		if cfg.RequestHasher != nil {
+			log.Println("Request hasher is not nil")
 			requestHash, err = cfg.RequestHasher(c, body)
+			log.Println("Request Hash::", requestHash)
 			if err != nil {
 				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
 		} else {
+			log.Println("Request hasher is nil")
 			requestHash = HashBytes(body)
+			log.Println("Request Hash::", requestHash)
 		}
 
+		// 5. Begin Idempotency
 		begin, err := svc.BeginHTTP(c.Request.Context(), scope, rawKey, requestHash)
 		if err == ErrRequestHashMismatch {
 			c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": err.Error()})
@@ -69,26 +84,34 @@ func GinMiddleware(svc Service, cfg MiddlewareConfig) gin.HandlerFunc {
 			return
 		}
 
+		// 6. Check cache result
+		log.Println("Replay detected, returning cached response")
 		if begin.Decision == BeginReplay && begin.Record != nil {
+			log.Println("Replay detected, returning cached response")
 			for k, v := range begin.Record.Headers {
 				c.Header(k, v)
 			}
+			// Add header X-Idempotency-Replayed to the response
 			c.Header("X-Idempotency-Replayed", "true")
+			// Data writes some data into the body stream and updates the HTTP code.
 			c.Data(begin.Record.ResponseCode, contentType(begin.Record.Headers), begin.Record.ResponseBody)
 			c.Abort()
 			return
 		}
 
-		rec := newResponseRecorder(c.Writer)
-		c.Writer = rec
-		c.Next()
+		// 7. Continue request
+		rec := newResponseRecorder(c.Writer) // rec is a wrapper around the original ResponseWriter, which buffers the response
+		c.Writer = rec                       // Replace the original ResponseWriter with the wrapper
+		c.Next()                             // Continue processing the request
 
+		// 8. Get result from response
 		result := Result{
 			StatusCode: rec.Status(),
 			Body:       rec.body.Bytes(),
 			Headers:    flattenHeaders(rec.Header()),
 		}
 
+		// 9. Complete Idempotency
 		_ = svc.CompleteHTTP(c.Request.Context(), scope, rawKey, result)
 	}
 }

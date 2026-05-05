@@ -45,6 +45,7 @@ func (s *service) BeginHTTP(ctx context.Context, scope, rawKey, requestHash stri
 	scope = NormalizeScope(scope)
 	key := BuildKey(scope, rawKey)
 	now := s.clock.Now()
+	// 1. Create record
 	record := Record{
 		Key:         key,
 		Scope:       scope,
@@ -53,37 +54,45 @@ func (s *service) BeginHTTP(ctx context.Context, scope, rawKey, requestHash stri
 		StartedAt:   now,
 	}
 
+	// 2. Try acquire lock (Redis SETNX)
 	decision, existing, err := s.store.Reserve(ctx, record, s.config.InProgressTTL)
 	if err != nil {
 		return BeginResult{}, err
 	}
 
+	// 3. If lock acquired => return proceed and record
 	if decision == ReserveAcquired {
 		return BeginResult{
 			Decision: BeginProceed,
 			Record:   &record,
 		}, nil
 	}
+	// 4. If lock not acquired => check existing record
 
+	// 4.1 If record not found => return error
 	if existing == nil {
 		return BeginResult{}, ErrRecordNotFound
 	}
+	// 4.2 If hash doesn't match => return error
 	if existing.RequestHash != "" && requestHash != existing.RequestHash {
 		return BeginResult{}, ErrRequestHashMismatch
 	}
 
 	switch existing.Status {
+	// 4.3 If record is completed => return replay
 	case StatusCompleted:
 		return BeginResult{
 			Decision: BeginReplay,
 			Record:   existing,
 		}, nil
 
+	// 4.4 If record is in progress => return conflict
 	case StatusInProgress:
 		return BeginResult{
 			Decision: BeginConflict,
 			Record:   existing,
 		}, ErrRequestInProgress
+	// 4.5 For other statuses => return conflict
 	default:
 		return BeginResult{
 			Decision: BeginConflict,
@@ -92,6 +101,7 @@ func (s *service) BeginHTTP(ctx context.Context, scope, rawKey, requestHash stri
 	}
 }
 
+// CompleteHTTP marks the record as completed and sets the response
 func (s *service) CompleteHTTP(ctx context.Context, scope, rawKey string, result Result) error {
 	if strings.TrimSpace(rawKey) == "" {
 		return ErrMissingKey
@@ -99,6 +109,7 @@ func (s *service) CompleteHTTP(ctx context.Context, scope, rawKey string, result
 	key := BuildKey(scope, rawKey)
 	return s.store.Complete(ctx, key, result, s.config.CompletedTTL, s.clock.Now())
 }
+
 func (s *service) ReleaseHTTP(ctx context.Context, scope, rawKey string) error {
 	if strings.TrimSpace(rawKey) == "" {
 		return ErrMissingKey
@@ -106,6 +117,7 @@ func (s *service) ReleaseHTTP(ctx context.Context, scope, rawKey string) error {
 	key := BuildKey(scope, rawKey)
 	return s.store.Release(ctx, key)
 }
+
 func (s *service) GetHTTP(ctx context.Context, scope, rawKey string) (*Record, error) {
 	if strings.TrimSpace(rawKey) == "" {
 		return nil, ErrMissingKey
@@ -113,6 +125,7 @@ func (s *service) GetHTTP(ctx context.Context, scope, rawKey string) (*Record, e
 	key := BuildKey(scope, rawKey)
 	return s.store.Get(ctx, key)
 }
+
 func (s *service) TryProcessEvent(
 	ctx context.Context,
 	consumerName string,

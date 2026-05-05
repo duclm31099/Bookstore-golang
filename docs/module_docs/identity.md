@@ -1,8 +1,8 @@
 # Module Identity — Schema & API Specification
 
-> **Phiên bản:** v1.1  
-> **Cập nhật:** 2026-04-27  
-> **Stack:** Go (pgx/v5), PostgreSQL 15+, JWT (HS256), Bcrypt
+> **Phiên bản:** v1.2  
+> **Cập nhật:** 2026-05-04  
+> **Stack:** Go (pgx/v5), PostgreSQL 15+, Redis, Kafka, JWT, Bcrypt
 
 ---
 
@@ -49,7 +49,7 @@ internal/modules/identity/
 │   │   ├── *_repo.go (5 repos + query_repo)
 │   │   └── provider.go
 │   └── adapters/         ← ✅ Bridge layer (identity-specific adapters + thin wrappers)
-│       ├── log_event_publisher.go  ← EventPublisher (identity domain event)
+│       ├── outbox_event_publisher.go ← EventPublisher (Transaction Outbox)
 │       ├── real_clock.go           ← Clock
 │       └── provider.go             ← wire.ProviderSet + jwtTokenManagerBridge
 └── http/                 ← HTTP handlers (chưa implement)
@@ -59,7 +59,12 @@ internal/platform/auth/               ← ✅ Platform-level auth implementation
 ├── bcrypt_hasher.go      ← BcryptHasher (password hashing)
 ├── jwt_token_manager.go  ← JWTTokenManager + JWTClaims
 ├── redis_verify_token.go ← RedisVerificationTokenService
-└── rand.go               ← generateSecureToken() helper
+├── rand.go               ← generateSecureToken() helper
+└── idempotency/          ← Idempotency Middleware & Storage
+internal/platform/outbox/ ← ✅ Transactional Outbox implementation
+├── recorder.go           ← Ghi event vào DB
+├── dispatcher.go         ← Quét và publish lên Kafka
+└── postgres_repository.go
 ```
 
 ### Nguyên tắc thiết kế
@@ -69,6 +74,8 @@ internal/platform/auth/               ← ✅ Platform-level auth implementation
 | **Domain không biết DB**             | Repo interface ở domain, implementation ở infra                                                                                |
 | **Transaction boundary ở App layer** | `tx.TxManager.WithinTransaction()` → `tx.GetExecutor(ctx, pool)`                                                               |
 | **Ports & Adapters**                 | App layer phụ thuộc vào interface (`ports/`), infra cung cấp implementation                                                    |
+| **Transactional Outbox**            | Đảm bảo tính nhất quán giữa DB và Kafka. Event được ghi vào DB cùng transaction với nghiệp vụ.                                |
+| **Idempotency**                     | Sử dụng `Idempotency-Key` header và Redis để chống duplicate request (đặc biệt quan trọng cho Register).                      |
 | **Platform vs Module separation**    | Logic không gắn business (crypto, JWT, Redis token) ở `platform/auth/`; chỉ adapters identity-specific mới ở `infra/adapters/` |
 | **Credential tách riêng**            | `Credential` entity độc lập, không bao giờ serialize ra ngoài                                                                  |
 | **Refresh token không lưu raw**      | Chỉ lưu hash SHA-256(random hex 32 bytes) vào DB                                                                               |
@@ -745,20 +752,22 @@ type AddressView struct {
 - `password: string`
 - `full_name: string`
 - `phone?: string`
+- `Idempotency-Key: string` (HTTP Header)
 
 **Flow:**
 
-1. `RegisterPolicy.ValidateRegistration(email, password)` — validate input
-2. `UserRepository.ExistsByEmail(email)` — check trùng email
-3. `PasswordHasher.Hash(ctx, password)` — hash bằng bcrypt
-4. Tạo `User` entity với `Status = pending_verification`
-5. `tx.TxManager.WithinTransaction`:
+1. **Idempotency Check**: Middleware kiểm tra `Idempotency-Key` trong Redis. Nếu đã có kết quả cache, trả về ngay lập tức.
+2. `RegisterPolicy.ValidateRegistration(email, password)` — validate input
+3. `UserRepository.ExistsByEmail(email)` — check trùng email
+4. `PasswordHasher.Hash(ctx, password)` — hash bằng bcrypt
+5. Tạo `User` entity với `Status = pending_verification` và `Version = 1`
+6. `tx.TxManager.WithinTransaction`:
    - `UserRepository.Insert(user)`
    - `CredentialRepository.Insert(credential)`
    - `VerificationTokenService.IssueEmailVerificationToken(userID)` — tạo token Redis
-   - `EventPublisher.PublishUserRegistered(payload)` — phát event (Phase 1: log)
+   - `EventPublisher.PublishUserRegistered(payload)` — Ghi vào bảng `outbox_events` (Atomic)
 
-**Output:** `dto.RegisterOutput{UserID, Email, Message}`
+**Output:** `dto.RegisterOutput{UserID, Email, Message}` + Header `X-Idempotency-Replayed` (nếu có)
 
 ---
 
@@ -924,15 +933,19 @@ func (s *RedisVerificationTokenService) ParseEmailVerificationToken(ctx, token s
 
 ---
 
-### 9.4 `LogEventPublisher` → `ports.EventPublisher` _(identity-specific)_
+### 9.4 `OutboxEventPublisher` → `ports.EventPublisher` _(identity-specific)_
 
 ```go
-// identity/infra/adapters/log_event_publisher.go
-type LogEventPublisher struct{ log *zap.Logger }
+// identity/infra/adapters/outbox_event_publisher.go
+type OutboxEventPublisher struct {
+    recorder *outbox.OutboxRecorder
+    log      *zap.Logger
+}
 ```
 
-> **Phase 1:** Chỉ log sự kiện bằng `zap.Logger`. Không gửi email thật.
-> **Phase 2:** Swap sang `KafkaEventPublisher` hoặc `SMTPPublisher` mà không đụng vào `AuthService`.
+- **Cơ chế**: Thay vì publish trực tiếp lên Kafka, adapter này sử dụng `OutboxRecorder` để ghi sự kiện vào bảng `outbox_events` trong cùng transaction nghiệp vụ.
+- **Tính nhất quán**: Đảm bảo sự kiện luôn được ghi lại nếu nghiệp vụ thành công (Atomicity).
+- **Phục hồi**: `OutboxDispatcher` (Background Worker) sẽ quét bảng này để publish lên Kafka topic `notification.commands.v1`.
 
 ---
 
@@ -1045,10 +1058,16 @@ internal/bootstrap/providers.go
 ---
 
 ## 11. HTTP API Specification
-
-> **Trạng thái:** Chưa implement HTTP handlers. Phần này là đặc tả để hướng dẫn implement sau.
->
-> Tham khảo spec chi tiết trong tài liệu `docs/specs/` hoặc từ bản gốc của file này.
+ 
+ ### 11.1 Auth API
+ 
+ #### POST `/api/v1/auth/register`
+ - **Description**: Đăng ký tài khoản mới.
+ - **Headers**:
+ - `Idempotency-Key`: (String, Required) UUID dùng để chống trùng lặp request.
+ - **Body**: `RegisterRequest`
+ - **Response (201)**: `REGISTER_SUCCESS`
+ - Headers: `X-Idempotency-Replayed: true` (nếu request được phục hồi từ Redis).
 
 ---
 
@@ -1081,8 +1100,10 @@ Module identity phụ thuộc vào các platform packages:
 | `platform/auth`   | `*auth.Auth` giữ cho HTTP middleware — validate access token       |
 | `platform/tx`     | `TxManager` interface + `*Manager` impl + `GetExecutor(ctx, pool)` |
 | `platform/db`     | pgxpool connection pool                                            |
-| `platform/redis`  | `*goredis.Client` — dùng cho verification token (Redis)            |
+| `platform/redis`  | `*goredis.Client` — dùng cho verification token và Idempotency |
 | `platform/config` | JWT config (secret, AccessTokenTTL, RefreshTokenTTL, BcryptCost)   |
+| `platform/outbox` | Implement Transactional Outbox pattern                           |
+| `platform/idempotency` | Middleware và Service quản lý tính idempotent cho API        |
 
 **Token lifetimes:**
 
@@ -1099,8 +1120,7 @@ Module identity phụ thuộc vào các platform packages:
 | --- | ------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------- |
 | 1   | `query_repo.go` `queryMe` | SELECT thiếu các cột `phone`, `user_type`, `locked_reason`, `metadata`, `version`, `last_login_at` so với `scanUser` | **MEDIUM** |
 | 2   | `auth.go` `*auth.Auth`    | Chỉ giữ lại để HTTP middleware validate access token — không còn dùng trong service                                  | INFO       |
-| 3   | `http/`                   | HTTP handlers chưa implement                                                                                         | **HIGH**   |
-| 4   | `EventPublisher`          | Phase 1 chỉ log — chưa gửi email thật cho user                                                                       | **HIGH**   |
+| 3   | `Outbox Worker`           | Cần implement vòng lặp Dispatch trong `cmd/worker/main.go` để xử lý event liên tục.                                  | **HIGH**   |
 
 ### 📌 Việc cần làm tiếp theo
 
@@ -1119,7 +1139,10 @@ http/
 - Anti-corruption layer (`rows.go` → `mapper.go`)
 - Transaction management (`tx.TxManager.WithinTransaction`)
 - **Port interfaces** (`PasswordHasher`, `TokenManager`, `VerificationTokenService`, `EventPublisher`, `Clock`)
-- **Port adapters** (`BcryptHasher`, `JWTTokenManager`, `RedisVerificationTokenService`, `LogEventPublisher`, `RealClock`)
+- **Port adapters** (`BcryptHasher`, `JWTTokenManager`, `RedisVerificationTokenService`, `OutboxEventPublisher`, `RealClock`)
+- **Transactional Outbox**: Ghi event `user.registered` vào DB đồng bộ với registration transaction.
+- **Idempotency**: Tích hợp middleware cho API Register, sử dụng Redis store.
+- **E2E Testing**: Đã có bộ test `tests/e2e_register_test.go` kiểm thử toàn bộ luồng Register + Idempotency + Outbox.
 - **Application services** (`AuthService` — Register, Login, RefreshToken, Logout, VerifyEmail)
 - **DTOs** (`RegisterInput/Output`, `LoginInput/Output`, `RefreshTokenInput/Output`...)
 - **Commands** (9 command structs)
@@ -1188,6 +1211,6 @@ bookstore-backend-v2/internal/modules/identity/
 ├── http/ # Nhận HTTP Request từ client
 │ ├── auth_handler.go # Chuyển JSON -> Command -> gọi AuthService
 │ ├── user_handler.go  
- │ └── routes.go # Khai báo các endpoint (/api/v1/auth/...)
+│ └── router.go # Khai báo các endpoint & gán Idempotency middleware
 └── consumer/ # (Nếu có) Nhận event từ Kafka
-└── outbox_worker.go
+└── outbox_worker.go # Polling bảng outbox_events và dispatch lên Kafka

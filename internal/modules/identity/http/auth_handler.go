@@ -156,6 +156,6 @@ func writeAuthError(c *gin.Context, err error) {
 	case errors.Is(err, identityerr.ErrDeviceLimitReached):
 		httpx.Error(c, http.StatusUnprocessableEntity, "IDENTITY_DEVICE_LIMIT_REACHED", "device limit reached")
 	default:
-		httpx.Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "internal server error")
+		httpx.Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 	}
 }

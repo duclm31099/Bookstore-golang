@@ -12,6 +12,8 @@ import (
 	"github.com/duclm99/bookstore-backend-v2/internal/modules/identity/http/middleware"
 	"github.com/duclm99/bookstore-backend-v2/internal/modules/identity/infra/adapters"
 	"github.com/duclm99/bookstore-backend-v2/internal/modules/identity/infra/postgres"
+	"github.com/duclm99/bookstore-backend-v2/internal/platform/idempotency"
+	"github.com/duclm99/bookstore-backend-v2/internal/platform/outbox"
 )
 
 // Injectors from wire.go:
@@ -43,7 +45,9 @@ func InitializeAPIApp() (*APIApp, func(), error) {
 		return nil, nil, err
 	}
 	verificationTokenService := adapters.ProvideRedisVerificationTokenService(client)
-	eventPublisher := adapters.ProvideLogEventPublisher(logger)
+	postgresRepository := outbox.ProvideRepository(pool)
+	outboxRecorder := outbox.ProvideRecorder(postgresRepository)
+	eventPublisher := adapters.ProvideOutboxEventPublisher(outboxRecorder, logger)
 	clock := adapters.ProvideRealClock()
 	registerPolicy := service.ProvideRegisterPolicy()
 	devicePolicy := service.ProvideDevicePolicy()
@@ -56,7 +60,14 @@ func InitializeAPIApp() (*APIApp, func(), error) {
 	addressHandler := http.NewAddressHandler(addressService, profileService)
 	auth := ProvideAuthManager(config)
 	handlerFunc := middleware.NewAuthMiddleware(auth)
-	engine := ProvideGinEngine(config, logger, authHandler, profileHandler, addressHandler, handlerFunc)
+	universalClient := ProvideUniversalRedisClient(client)
+	store := idempotency.ProvideRedisStore(universalClient)
+	dbtx := ProvideIdempotencyDBTX(pool)
+	processedEventStore := idempotency.ProvideProcessedEventStore(dbtx)
+	idempotencyClock := idempotency.NewClock()
+	idempotencyConfig := idempotency.NewDefaultConfig()
+	idempotencyService := idempotency.NewDefaultService(store, processedEventStore, idempotencyClock, idempotencyConfig)
+	engine := ProvideGinEngine(config, logger, authHandler, profileHandler, addressHandler, handlerFunc, idempotencyService)
 	server := ProvideHTTPServer(config, engine)
 	duration := ProvideShutdownTimeout(config)
 	apiApp := ProvideAPIApp(server, logger, duration)

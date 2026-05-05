@@ -1,7 +1,5 @@
 package kafka
 
-import "strconv"
-
 // 1. TYPE SAFETY: Định nghĩa kiểu dữ liệu riêng thay vì dùng string tự do
 type Topic string
 type AggregateType string
@@ -33,10 +31,10 @@ const (
 
 // EventKey nhận vào AggregateType thay vì string tự do.
 // Bất kỳ ai truyền chuỗi bậy bạ vào hàm này sẽ bị Go Compiler báo lỗi đỏ lòm ngay lập tức!
-func EventKey(aggType AggregateType, aggID int64) string {
+func EventKey(aggType AggregateType, aggID string) string {
 	// Trình biên dịch Go (từ bản 1.15+) tối ưu hóa toán tử "+" cho chuỗi rất tốt
 	// Nó sẽ tính toán độ dài trước và chỉ cấp phát bộ nhớ (allocate) đúng 1 lần.
-	return string(aggType) + ":" + strconv.FormatInt(aggID, 10)
+	return string(aggType) + ":" + aggID
 }
 
 var TopicKeyStrategy = map[Topic]string{

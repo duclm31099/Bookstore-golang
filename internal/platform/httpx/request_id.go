@@ -2,10 +2,21 @@
 package httpx
 
 import (
-	"github.com/gin-contrib/requestid"
+	util "github.com/duclm99/bookstore-backend-v2/internal/platform/idempotency"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 func RequestIDMiddleware() gin.HandlerFunc {
-	return requestid.New()
+	return func(c *gin.Context) {
+		requestID := c.GetHeader("X-Request-ID")
+		if requestID == "" {
+			requestID = uuid.New().String()
+		}
+
+		c.Set("request_id", requestID)
+		c.Request = c.Request.WithContext(util.WithRequestIdKey(c.Request.Context(), requestID))
+		c.Header("X-Request-ID", requestID)
+		c.Next()
+	}
 }

@@ -12,16 +12,16 @@ const (
 type ReserveDecision string
 
 const (
-	ReserveAcquired ReserveDecision = "acquired"
-	ReserveExisting ReserveDecision = "existing"
+	ReserveAcquired ReserveDecision = "acquired" // acquired means there is no record for this key
+	ReserveExisting ReserveDecision = "existing" // existing means there is a record for this key
 )
 
 type BeginDecision string
 
 const (
-	BeginProceed  BeginDecision = "proceed"
-	BeginReplay   BeginDecision = "replay"
-	BeginConflict BeginDecision = "conflict"
+	BeginProceed  BeginDecision = "proceed"  // proceed means there is no record for this key
+	BeginReplay   BeginDecision = "replay"   // replay means there is a record for this key
+	BeginConflict BeginDecision = "conflict" // conflict means there is a record for this key but the request hash does not match
 )
 
 type Record struct {

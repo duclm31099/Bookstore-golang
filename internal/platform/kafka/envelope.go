@@ -11,7 +11,7 @@ type Envelope struct {
 	EventID       string `json:"event_id"`
 	EventType     string `json:"event_type"`
 	AggregateType string `json:"aggregate_type"`
-	AggregateID   int64  `json:"aggregate_id"`
+	AggregateID   string `json:"aggregate_id"`
 
 	// Timing
 	OccurredAt time.Time `json:"occurred_at"`
@@ -42,7 +42,7 @@ type Envelope struct {
 func NewEnvelope(
 	eventType string,
 	aggregateType string,
-	aggregateID int64,
+	aggregateID string,
 	occurredAt time.Time,
 	payload []byte, // Nhận []byte từ service (đã json.Marshal)
 	opts ...EnvelopeOption,
@@ -92,7 +92,7 @@ func WithActor(actorType string, actorID int64) EnvelopeOption {
 	}
 }
 
-func WithIdempotencyKey(key string) EnvelopeOption {
+func WithIdKey(key string) EnvelopeOption {
 	return func(e *Envelope) { e.IdempotencyKey = key }
 }
 

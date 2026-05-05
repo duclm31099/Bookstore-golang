@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -22,32 +23,44 @@ func NewRedisStore(rdb redis.UniversalClient) *RedisStore {
 }
 
 func NewRedisStoreWithPrefix(rdb redis.UniversalClient, prefix string) *RedisStore {
-	if prefix == "" {
-		prefix = DefaultRedisKeyPrefix
-	}
 	return &RedisStore{
 		rdb:    rdb,
 		prefix: prefix,
 	}
 }
 
+// Reserve dùng Redis SETNX để “xí chỗ” một request trước khi xử lý.
+// Nếu key đã tồn tại → request này là duplicate → trả về existing.
+// Nếu chưa tồn tại → set key với TTL → đánh dấu đang xử lý.
+// Chỉ dùng prefix cho Redis key để dễ debug, không dùng trong logic business.
 func (s *RedisStore) Reserve(ctx context.Context, rec Record, ttl time.Duration) (ReserveDecision, *Record, error) {
+	// 1. Tạo idempotency key từ config
 	key := s.redisKey(rec.Key)
+	log.Println("Reserve redisKey ::", key)
 
+	// 2. Marshal record struct to JSON
 	payload, err := json.Marshal(rec)
 	if err != nil {
 		return "", nil, err
 	}
+	log.Println("Reserve payload ::", string(payload))
 
+	// 3. SetNX là atomic: chỉ set nếu key chưa tồn tại.
+	// 4. ttl = 30 phút (thời gian sống của request)
+	log.Println("Reserve ttl ::", ttl)
 	ok, err := s.rdb.SetNX(ctx, key, payload, ttl).Result()
 	if err != nil {
 		return "", nil, err
 	}
+
 	if ok {
+		// 5. Nếu chưa có key -> return acquired
 		return ReserveAcquired, &rec, nil
 	}
 
+	// 6. Nếu đã có key -> return existing
 	existing, err := s.Get(ctx, rec.Key)
+	log.Println("Reserve existing ::", string(existing.ResponseBody))
 	if err != nil {
 		return "", nil, err
 	}
@@ -71,25 +84,34 @@ func (s *RedisStore) Get(ctx context.Context, key string) (*Record, error) {
 }
 
 func (s *RedisStore) Complete(ctx context.Context, key string, result Result, ttl time.Duration, now time.Time) error {
+	// 1. Get record từ redis cache
 	rec, err := s.Get(ctx, key)
 	if err != nil {
 		if errors.Is(err, ErrRecordNotFound) {
+			// Nếu record không tồn tại => return nil
 			return nil
 		}
 		return err
 	}
 
+	// 2. Update record status
 	rec.Status = StatusCompleted
+	// 3. Set completed at
 	rec.CompletedAt = now
+	// 4. Set response code
 	rec.ResponseCode = result.StatusCode
+	// 5. Set response body
 	rec.ResponseBody = append([]byte(nil), result.Body...)
+	// 6. Set headers
 	rec.Headers = cloneHeaders(result.Headers)
 
+	// 7. Marshal record struct to JSON
 	payload, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
 
+	// 8. Set record to redis
 	if err := s.rdb.Set(ctx, s.redisKey(key), payload, ttl).Err(); err != nil {
 		return wrapRedisErr(err)
 	}
@@ -104,7 +126,7 @@ func (s *RedisStore) Release(ctx context.Context, key string) error {
 }
 
 func (s *RedisStore) redisKey(key string) string {
-	return s.prefix + key
+	return key
 }
 
 func cloneHeaders(in map[string]string) map[string]string {
