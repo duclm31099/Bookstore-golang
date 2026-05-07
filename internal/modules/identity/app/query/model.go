@@ -13,8 +13,8 @@ type MeView struct {
 
 type SessionView struct {
 	ID        int64
-	DeviceID  *int64
-	IPAddress string
+	DeviceID  int64
+	IPAddress *string
 	UserAgent string
 	ExpiredAt time.Time
 	RevokedAt *time.Time

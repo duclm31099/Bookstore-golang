@@ -340,14 +340,15 @@ session:v1:{session_id}
 **Value**
 ```json
 {
-  "session_id": "uuid",
+  "id": 12345,
   "user_id": 901,
   "device_id": 2001,
-  "status": "active",
+  "session_status": "active",
   "refresh_token_hash": "...",
-  "issued_at": "2026-04-17T18:00:00Z",
   "expires_at": "2026-05-17T18:00:00Z",
-  "last_seen_at": "2026-04-17T18:10:00Z"
+  "last_seen_at": "2026-04-17T18:10:00Z",
+  "created_at": "2026-04-17T18:00:00Z",
+  "updated_at": "2026-04-17T18:10:00Z"
 }
 ```
 

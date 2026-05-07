@@ -111,7 +111,7 @@ migrations/
 ### Lưu ý migration
 - `users.email` unique ngay từ đầu.
 - `version` nên có default 1.
-- FK `user_sessions.device_id` dùng `SET NULL` để tránh xóa device làm mất lịch sử session.
+- FK `user_sessions.device_id` dùng `CASCADE` để tự động dọn dẹp session khi device bị xóa.
 - `addresses` nên có index `(user_id, is_default)` ngay từ đầu.
 
 ## 6.2 Nhóm Catalog

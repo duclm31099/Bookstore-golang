@@ -31,13 +31,14 @@ func NewAuthManager(jwtCfg config.JWTConfig) *Auth {
 
 // Generate Token - a new JWT token for the given user ID.
 func (a *Auth) GenerateAccessToken(userID int64, email, role string) (string, error) {
+	expiresAt := time.Now().Add(a.jwtCfg.AccessTokenTTL)
 	raw := Claims{
 		UserID: userID,
 		Email:  email,
 		Role:   role,
 		Type:   "access",
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(30 * 24 * time.Hour)),
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 	}

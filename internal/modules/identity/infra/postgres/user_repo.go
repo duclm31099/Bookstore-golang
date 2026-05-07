@@ -34,14 +34,19 @@ const (
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id
 	`
 	queryUpdateStatus = `
-		UPDATE users SET account_status = $1, updated_at = NOW() WHERE id = $2
+		UPDATE users 
+		SET account_status = $1, updated_at = NOW(), version = version + 1
+		WHERE id = $2
 	`
 	queryMarkEmailVerified = `
 		UPDATE users
-		SET email_verified_at = COALESCE(email_verified_at, $1), 
-				account_status = CASE WHEN email_verified_at IS NULL THEN 'active' ELSE account_status END,
-				updated_at = NOW()
-		WHERE id = $2
+		SET 
+			email_verified_at = $1, 
+			account_status = 'active',
+			version = version + 1
+		WHERE 
+			id = $2 
+			AND email_verified_at IS NULL;
 	`
 
 	queryCheckExistEmail = `SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)`

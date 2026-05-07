@@ -6,6 +6,11 @@ import (
 	err "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/domain/error"
 )
 
+const (
+	AccessTokenTypeAccess  = "access"
+	AccessTokenTypeRefresh = "refresh"
+)
+
 // Session đại diện cho một refresh token lifecycle
 // Access token là ephemeral và stateless (JWT), không được lưu
 // Refresh token được lưu dưới dạng hash để không expose raw value
@@ -13,10 +18,10 @@ type Session struct {
 	ID               int64
 	UserID           int64
 	RefreshTokenHash string // NEVER store raw refresh token
-	DeviceID         *int64 // nil nếu device chưa đăng ký
+	DeviceID         int64
 	SessionStatus    string
 	ExpiredAt        time.Time
-	IPAddress        string
+	IPAddress        *string
 	UserAgent        string
 	LastSeenAt       time.Time
 	RevokedAt        *time.Time

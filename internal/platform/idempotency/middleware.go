@@ -3,10 +3,10 @@ package idempotency
 import (
 	"bytes"
 	"io"
-	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 type ScopeResolver func(c *gin.Context) string
@@ -30,9 +30,7 @@ func GinMiddleware(svc Service, cfg MiddlewareConfig) gin.HandlerFunc {
 		// 2. Lấy scope từ config hoặc sử dụng default
 		scope := "default"
 		if cfg.ScopeResolver != nil {
-			log.Println("Scope resolver is not nil")
 			scope = cfg.ScopeResolver(c)
-			log.Println("Scope::", scope)
 		}
 
 		// 3. Check idempotency key from header is exists
@@ -50,23 +48,19 @@ func GinMiddleware(svc Service, cfg MiddlewareConfig) gin.HandlerFunc {
 		if c.Request.Body != nil {
 			body, _ = io.ReadAll(c.Request.Body)
 			c.Request.Body = io.NopCloser(bytes.NewBuffer(body))
-			log.Println("Body::", string(body))
 		}
 
 		var requestHash string
 		var err error
 		if cfg.RequestHasher != nil {
-			log.Println("Request hasher is not nil")
 			requestHash, err = cfg.RequestHasher(c, body)
-			log.Println("Request Hash::", requestHash)
+
 			if err != nil {
 				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
 		} else {
-			log.Println("Request hasher is nil")
 			requestHash = HashBytes(body)
-			log.Println("Request Hash::", requestHash)
 		}
 
 		// 5. Begin Idempotency
@@ -85,12 +79,11 @@ func GinMiddleware(svc Service, cfg MiddlewareConfig) gin.HandlerFunc {
 		}
 
 		// 6. Check cache result
-		log.Println("Replay detected, returning cached response")
 		if begin.Decision == BeginReplay && begin.Record != nil {
-			log.Println("Replay detected, returning cached response")
 			for k, v := range begin.Record.Headers {
 				c.Header(k, v)
 			}
+			zap.L().Info("Idempotency replayed", zap.Any("record", begin.Record))
 			// Add header X-Idempotency-Replayed to the response
 			c.Header("X-Idempotency-Replayed", "true")
 			// Data writes some data into the body stream and updates the HTTP code.

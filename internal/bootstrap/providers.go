@@ -37,6 +37,10 @@ func ProvideLogger(cfg *config.Config) (*zap.Logger, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	// Register logger globally for use in middleware, handlers, etc.
+	// This allows functions anywhere in the package to call log.Info, log.Error, etc.
+	// without needing to pass the logger explicitly.
+	zap.ReplaceGlobals(log)
 
 	cleanup := func() {
 		_ = log.Sync()

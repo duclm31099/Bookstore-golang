@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -36,18 +35,15 @@ func NewRedisStoreWithPrefix(rdb redis.UniversalClient, prefix string) *RedisSto
 func (s *RedisStore) Reserve(ctx context.Context, rec Record, ttl time.Duration) (ReserveDecision, *Record, error) {
 	// 1. Tạo idempotency key từ config
 	key := s.redisKey(rec.Key)
-	log.Println("Reserve redisKey ::", key)
 
 	// 2. Marshal record struct to JSON
 	payload, err := json.Marshal(rec)
 	if err != nil {
 		return "", nil, err
 	}
-	log.Println("Reserve payload ::", string(payload))
 
 	// 3. SetNX là atomic: chỉ set nếu key chưa tồn tại.
-	// 4. ttl = 30 phút (thời gian sống của request)
-	log.Println("Reserve ttl ::", ttl)
+	// 4. ttl = 5 phút (thời gian sống của request)
 	ok, err := s.rdb.SetNX(ctx, key, payload, ttl).Result()
 	if err != nil {
 		return "", nil, err
@@ -60,7 +56,6 @@ func (s *RedisStore) Reserve(ctx context.Context, rec Record, ttl time.Duration)
 
 	// 6. Nếu đã có key -> return existing
 	existing, err := s.Get(ctx, rec.Key)
-	log.Println("Reserve existing ::", string(existing.ResponseBody))
 	if err != nil {
 		return "", nil, err
 	}

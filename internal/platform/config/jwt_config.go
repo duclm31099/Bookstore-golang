@@ -13,8 +13,8 @@ type JWTConfig struct {
 func loadJWTConfig() JWTConfig {
 	return JWTConfig{
 		Secret:          mustGetEnv("JWT_SECRET"),
-		AccessTokenTTL:  time.Duration(getEnvAsInt("JWT_ACCESS_TOKEN_TTL_MINUTES", 120)) * time.Minute,
-		RefreshTokenTTL: time.Duration(getEnvAsInt("JWT_REFRESH_TOKEN_TTL_DAYS", 30)) * time.Hour,
+		AccessTokenTTL:  time.Duration(getEnvAsInt("JWT_ACCESS_TOKEN_TTL_MINUTES", 24)) * time.Hour,
+		RefreshTokenTTL: time.Duration(getEnvAsInt("JWT_REFRESH_TOKEN_TTL_DAYS", 30)) * time.Hour * 24,
 		Issuer:          mustGetEnv("JWT_ISSUER"),
 		BcryptCost:      getEnvAsInt("BCRYPT_COST", 12),
 	}

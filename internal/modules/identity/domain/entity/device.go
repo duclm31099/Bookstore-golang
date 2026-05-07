@@ -14,7 +14,7 @@ type Device struct {
 	FirstSeenAt   time.Time
 	LastSeenAt    time.Time
 	RevokedAt     *time.Time
-	RevokedReason string
+	RevokedReason *string
 	Metadata      map[string]interface{}
 	CreatedAt     time.Time
 	UpdatedAt     time.Time

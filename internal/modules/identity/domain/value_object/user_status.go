@@ -18,7 +18,7 @@ func (s UserStatus) IsActive() bool {
 
 // CanLogin kiểm tra user có thể đăng nhập không
 func (s UserStatus) CanLogin() bool {
-	return s == UserStatusActive || s == UserStatusPendingVerification
+	return s == UserStatusActive
 }
 
 // Transitions mô tả các chuyển trạng thái hợp lệ

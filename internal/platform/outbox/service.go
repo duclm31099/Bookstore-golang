@@ -39,7 +39,6 @@ func (s *OutboxRecorder) Record(ctx context.Context, params RecordParams) error 
 	}
 
 	payloadJSON, err := json.Marshal(envelope)
-	log.Println("outbox payload:: ", string(payloadJSON))
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrMarshal, err)
 	}

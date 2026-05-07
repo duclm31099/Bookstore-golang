@@ -27,11 +27,11 @@ type userRow struct {
 type sessionRow struct {
 	ID               int64
 	UserID           int64
-	DeviceID         *int64
+	DeviceID         int64
 	RefreshTokenHash string
 	SessionStatus    string
 	ExpiredAt        time.Time
-	IPAddress        string
+	IPAddress        *string
 	UserAgent        string
 	LastSeenAt       time.Time
 	RevokedAt        *time.Time
@@ -49,7 +49,7 @@ type deviceRow struct {
 	FirstSeenAt   time.Time
 	LastSeenAt    time.Time
 	RevokedAt     *time.Time
-	RevokedReason string
+	RevokedReason *string
 	Metadata      map[string]interface{}
 	CreatedAt     time.Time
 	UpdatedAt     time.Time

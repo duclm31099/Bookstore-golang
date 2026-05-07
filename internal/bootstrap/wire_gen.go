@@ -45,13 +45,14 @@ func InitializeAPIApp() (*APIApp, func(), error) {
 		return nil, nil, err
 	}
 	verificationTokenService := adapters.ProvideRedisVerificationTokenService(client)
+	redisSessionService := adapters.ProvideRedisSessionService(client)
 	postgresRepository := outbox.ProvideRepository(pool)
 	outboxRecorder := outbox.ProvideRecorder(postgresRepository)
 	eventPublisher := adapters.ProvideOutboxEventPublisher(outboxRecorder, logger)
 	clock := adapters.ProvideRealClock()
 	registerPolicy := service.ProvideRegisterPolicy()
 	devicePolicy := service.ProvideDevicePolicy()
-	authService := service.NewAuthService(txManager, userRepository, credentialRepository, sessionRepository, deviceRepository, queryRepository, passwordHasher, tokenManager, verificationTokenService, eventPublisher, clock, registerPolicy, devicePolicy)
+	authService := service.NewAuthService(txManager, userRepository, credentialRepository, sessionRepository, deviceRepository, queryRepository, passwordHasher, tokenManager, verificationTokenService, redisSessionService, eventPublisher, clock, registerPolicy, devicePolicy)
 	authHandler := http.NewAuthHandler(authService)
 	profileService := service.NewProfileService(txManager, userRepository, deviceRepository, queryRepository, sessionRepository, clock)
 	profileHandler := http.NewProfileHandler(profileService)

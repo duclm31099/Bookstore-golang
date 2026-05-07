@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/duclm99/bookstore-backend-v2/internal/modules/identity/domain/entity"
 	"github.com/duclm99/bookstore-backend-v2/internal/platform/config"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -39,13 +40,12 @@ func NewJWTTokenManager(cfg config.JWTConfig) *JWTTokenManager {
 
 // GenerateAccessToken tạo HS256 JWT với claims đầy đủ và TTL từ config.
 func (m *JWTTokenManager) GenerateAccessToken(_ context.Context, claims JWTClaims) (string, time.Time, error) {
-	expiresAt := time.Now().Add(m.cfg.AccessTokenTTL)
-
+	expiresAt := time.Now().Add(m.cfg.AccessTokenTTL) // 2 hours
 	payload := jwtPayload{
 		UserID: claims.UserID,
 		Email:  claims.Email,
 		Role:   claims.Role,
-		Type:   "access",
+		Type:   string(entity.AccessTokenTypeAccess),
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    m.cfg.Issuer,
 			IssuedAt:  jwt.NewNumericDate(time.Now()),

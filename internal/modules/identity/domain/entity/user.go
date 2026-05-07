@@ -7,6 +7,21 @@ import (
 	valueobject "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/domain/value_object"
 )
 
+type AccountStatus string
+type UserType string
+
+// 2. Khai báo các hằng số thuộc về kiểu dữ liệu đó
+const (
+	AccountStatusPending AccountStatus = "pending_verification"
+	AccountStatusActive  AccountStatus = "active"
+	AccountStatusLocked  AccountStatus = "locked"
+
+	UserTypeCustomer UserType = "customer"
+	UserTypeAdmin    UserType = "admin"
+
+	PasswordAlgoBcrypt string = "bcrypt"
+)
+
 type User struct {
 	ID              int64
 	Email           valueobject.Email

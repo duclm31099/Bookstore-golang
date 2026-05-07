@@ -52,6 +52,13 @@ func ProvideRedisVerificationTokenService(rdb *goredis.Client) ports.Verificatio
 	return platformAuth.NewRedisVerificationTokenService(rdb)
 }
 
+// ── Session Service ──────────────────────────────────────────────────────────
+// RedisSessionService thỏa mãn ports.RedisSessionService trực tiếp.
+
+func ProvideRedisSessionService(rdb *goredis.Client) ports.RedisSessionService {
+	return platformAuth.NewRedisSessionService(rdb)
+}
+
 // ── Event Publisher ──────────────────────────────────────────────────────────
 
 func ProvideOutboxEventPublisher(recorder outbox.Recorder, log *zap.Logger) ports.EventPublisher {
@@ -71,6 +78,7 @@ var ProviderSet = wire.NewSet(
 	ProvideBcryptHasher,
 	ProvideJWTTokenManager,
 	ProvideRedisVerificationTokenService,
+	ProvideRedisSessionService,
 	ProvideOutboxEventPublisher,
 	ProvideRealClock,
 )

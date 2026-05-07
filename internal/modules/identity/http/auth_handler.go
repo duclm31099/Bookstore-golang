@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/duclm99/bookstore-backend-v2/internal/modules/identity/app/command"
@@ -46,7 +47,13 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	httpx.Success(c, http.StatusCreated, "REGISTER_SUCCESS", out)
+	result := RegisterResponse{
+		UserID:  out.UserID,
+		Email:   out.Email,
+		Message: "Registration successful, please verify your email",
+	}
+
+	httpx.Success(c, http.StatusCreated, "REGISTER_SUCCESS", result)
 }
 
 func (h *AuthHandler) Login(c *gin.Context) {
@@ -54,21 +61,36 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-
-	out, err := h.authService.Login(c.Request.Context(), command.LoginCommand{
+	cmd := command.LoginCommand{
 		Email:             req.Email,
 		Password:          req.Password,
 		DeviceFingerprint: req.DeviceFingerprint,
 		DeviceLabel:       req.DeviceLabel,
 		IPAddress:         c.ClientIP(),
 		UserAgent:         c.Request.UserAgent(),
-	})
+	}
+	log.Println("cmd login: ", cmd)
+
+	out, err := h.authService.Login(c.Request.Context(), cmd)
 	if err != nil {
 		writeAuthError(c, err)
 		return
 	}
 
-	httpx.Success(c, http.StatusOK, "LOGIN_SUCCESS", out)
+	result := LoginResponse{
+		AccessToken: out.AccessToken,
+		ExpiresAt:   out.AccessTokenExpiresAt,
+	}
+
+	c.SetCookie(
+		"refresh_token",
+		out.RefreshToken,
+		int(out.RefreshTokenExpiresAt.Unix()),
+		"/api/v1/auth/refresh-token",
+		"",
+		false,
+		true)
+	httpx.Success(c, http.StatusOK, "LOGIN_SUCCESS", result)
 }
 
 func (h *AuthHandler) RefreshToken(c *gin.Context) {

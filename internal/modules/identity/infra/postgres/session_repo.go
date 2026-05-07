@@ -56,12 +56,68 @@ const (
 		SET refresh_token_hash = $2, expires_at = $3, last_seen_at = $4
 		WHERE id = $1
 	`
+
+	queryGetByDeviceID = `
+		SELECT id, user_id, device_id, refresh_token_hash, session_status, expires_at, ip_address, user_agent, last_seen_at
+		FROM user_sessions
+		WHERE user_id = $1 AND device_id = $2 AND revoked_at IS NULL
+	`
+
+	queryUpsertSession = `
+		INSERT INTO user_sessions (user_id, device_id, refresh_token_hash, session_status, expires_at, ip_address, user_agent, last_seen_at)
+		VALUES ($1, $2, $3, $4, $5, $6::INET, $7, $8)
+		ON CONFLICT (user_id, device_id)
+		DO UPDATE SET
+			refresh_token_hash = EXCLUDED.refresh_token_hash,
+			session_status = EXCLUDED.session_status,
+			expires_at = EXCLUDED.expires_at,
+			ip_address = EXCLUDED.ip_address,
+			user_agent = EXCLUDED.user_agent,
+			last_seen_at = EXCLUDED.last_seen_at
+		RETURNING id, created_at, updated_at
+	`
 )
 
-func (r *SessionRepository) Update(ctx context.Context, session *entity.Session) error {
-	executor := tx.GetExecutor(ctx, r.pool)
+func (r *SessionRepository) GetByDeviceID(ctx context.Context, userID int64, deviceID int64) (*entity.Session, error) {
+	db := tx.GetExecutor(ctx, r.pool)
+	s := db.QueryRow(ctx, queryGetByDeviceID, userID, deviceID)
+	var row sessionRow
+	err := s.Scan(
+		&row.ID,
+		&row.UserID,
+		&row.DeviceID,
+		&row.RefreshTokenHash,
+		&row.SessionStatus,
+		&row.ExpiredAt,
+		&row.IPAddress,
+		&row.UserAgent,
+		&row.LastSeenAt,
+	)
 
-	_, err := executor.Exec(ctx, queryUpdateSession, session.ID, session.RefreshTokenHash, session.ExpiredAt, session.LastSeenAt)
+	if err != nil {
+		if isNoRows(err) {
+			return nil, err_domain.ErrSessionNotFound
+		}
+		return nil, err
+	}
+	return mapSessionRowToEntity(&row), nil
+}
+
+func (r *SessionRepository) Upsert(ctx context.Context, session *entity.Session) error {
+	db := tx.GetExecutor(ctx, r.pool)
+
+	err := db.QueryRow(ctx, queryUpsertSession,
+		session.UserID, session.DeviceID, session.RefreshTokenHash, session.SessionStatus,
+		session.ExpiredAt, session.IPAddress, session.UserAgent, session.LastSeenAt,
+	).Scan(&session.ID, &session.CreatedAt, &session.UpdatedAt)
+
+	return err
+}
+
+func (r *SessionRepository) Update(ctx context.Context, session *entity.Session) error {
+	db := tx.GetExecutor(ctx, r.pool)
+
+	_, err := db.Exec(ctx, queryUpdateSession, session.ID, session.RefreshTokenHash, session.ExpiredAt, session.LastSeenAt)
 	if err != nil {
 		return err
 	}
@@ -69,9 +125,9 @@ func (r *SessionRepository) Update(ctx context.Context, session *entity.Session)
 }
 
 func (r *SessionRepository) Insert(ctx context.Context, session *entity.Session) error {
-	executor := tx.GetExecutor(ctx, r.pool)
+	db := tx.GetExecutor(ctx, r.pool)
 
-	err := executor.QueryRow(ctx, queryInsertSession,
+	err := db.QueryRow(ctx, queryInsertSession,
 		session.UserID, session.DeviceID, session.RefreshTokenHash, session.SessionStatus,
 		session.ExpiredAt, session.IPAddress, session.UserAgent, session.LastSeenAt,
 	).Scan(&session.ID, &session.CreatedAt, &session.UpdatedAt)
@@ -84,9 +140,9 @@ func (r *SessionRepository) GetByRefreshTokenHash(ctx context.Context, hash stri
 }
 
 func (r *SessionRepository) ListActiveByUserID(ctx context.Context, userID int64) ([]*entity.Session, error) {
-	executor := tx.GetExecutor(ctx, r.pool)
+	db := tx.GetExecutor(ctx, r.pool)
 
-	rows, err := executor.Query(ctx, queryListActiveByUserID, userID, time.Now())
+	rows, err := db.Query(ctx, queryListActiveByUserID, userID, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -108,9 +164,9 @@ func (r *SessionRepository) ListActiveByUserID(ctx context.Context, userID int64
 }
 
 func (r *SessionRepository) Revoke(ctx context.Context, id int64, userID int64, revokedAt time.Time) error {
-	executor := tx.GetExecutor(ctx, r.pool)
+	db := tx.GetExecutor(ctx, r.pool)
 
-	result, err := executor.Exec(ctx, queryRevokeSession, id, revokedAt, time.Now(), userID)
+	result, err := db.Exec(ctx, queryRevokeSession, id, revokedAt, time.Now(), userID)
 	if err != nil {
 		return err
 	}
@@ -125,9 +181,9 @@ func (r *SessionRepository) GetByRefreshTokenHashForUpdate(ctx context.Context, 
 }
 
 func (r *SessionRepository) RevokeAllByUserID(ctx context.Context, userID int64, revokedAt time.Time) error {
-	executor := tx.GetExecutor(ctx, r.pool)
+	db := tx.GetExecutor(ctx, r.pool)
 
-	_, err := executor.Exec(ctx, queryRevokeAllByUserID, userID, revokedAt, time.Now())
+	_, err := db.Exec(ctx, queryRevokeAllByUserID, userID, revokedAt, time.Now())
 	if err != nil {
 		return err
 	}

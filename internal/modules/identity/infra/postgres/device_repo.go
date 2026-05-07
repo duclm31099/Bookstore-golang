@@ -7,6 +7,7 @@ import (
 	"github.com/duclm99/bookstore-backend-v2/internal/modules/identity/domain"
 	"github.com/duclm99/bookstore-backend-v2/internal/modules/identity/domain/entity"
 	"github.com/duclm99/bookstore-backend-v2/internal/platform/tx"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -77,6 +78,9 @@ func (r *DeviceRepository) GetByFingerprint(ctx context.Context, userID int64, f
 	deviceRow, err := scanDevice(row)
 
 	if err != nil {
+		if err == pgx.ErrNoRows {
+			return &entity.Device{}, nil
+		}
 		return nil, err
 	}
 
@@ -87,6 +91,9 @@ func (r *DeviceRepository) ListActiveByUserID(ctx context.Context, userID int64)
 
 	rows, err := executor.Query(ctx, queryListActiveDeviceByUserID, userID)
 	if err != nil {
+		if err == pgx.ErrNoRows {
+			return []*entity.Device{}, nil
+		}
 		return nil, err
 	}
 	defer rows.Close()
@@ -109,7 +116,7 @@ func (r *DeviceRepository) Upsert(ctx context.Context, device *entity.Device) er
 
 	err := executor.QueryRow(ctx, queryUpsertDevice, device.UserID,
 		device.Fingerprint, device.Label,
-		device.FirstSeenAt, device.LastSeenAt, device.RevokedAt).Scan(&device.ID, &device.FirstSeenAt)
+		device.FirstSeenAt, device.LastSeenAt, device.RevokedAt).Scan(&device.ID, &device.LastSeenAt)
 	if err != nil {
 		return err
 	}

@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	go_redis "github.com/redis/go-redis/v9"
 )
 
 const emailVerifyPrefix = "identity:email_verify:"
@@ -16,10 +16,10 @@ const emailVerifyTTL = 24 * time.Hour
 // RedisVerificationTokenService lưu và xác thực email verification token trong Redis.
 // Token là single-use: GetDel đảm bảo không dùng lại được (chống replay attack).
 type RedisVerificationTokenService struct {
-	rdb *goredis.Client
+	rdb *go_redis.Client
 }
 
-func NewRedisVerificationTokenService(rdb *goredis.Client) *RedisVerificationTokenService {
+func NewRedisVerificationTokenService(rdb *go_redis.Client) *RedisVerificationTokenService {
 	return &RedisVerificationTokenService{rdb: rdb}
 }
 
@@ -47,9 +47,10 @@ func (s *RedisVerificationTokenService) ParseEmailVerificationToken(ctx context.
 	key := emailVerifyPrefix + token
 
 	// Sử dụng Result() thay vì Bytes() để lấy thẳng ra chuỗi string
+	// GetDel: Get value of key and delete the key (atomic)
 	userIDStr, err := s.rdb.GetDel(ctx, key).Result()
 	if err != nil {
-		if errors.Is(err, goredis.Nil) {
+		if errors.Is(err, go_redis.Nil) {
 			return 0, fmt.Errorf("verification token not found or already used")
 		}
 		return 0, fmt.Errorf("get verify token: %w", err)
@@ -62,4 +63,26 @@ func (s *RedisVerificationTokenService) ParseEmailVerificationToken(ctx context.
 	}
 
 	return userID, nil
+}
+
+// SESSION REDIS SERVICE
+
+type RedisSessionService struct {
+	rdb *go_redis.Client
+}
+
+func NewRedisSessionService(rdb *go_redis.Client) *RedisSessionService {
+	return &RedisSessionService{rdb: rdb}
+}
+
+func (s *RedisSessionService) DeleteSession(ctx context.Context, key string) error {
+	return s.rdb.Del(ctx, key).Err()
+}
+
+func (s *RedisSessionService) SetUserSession(ctx context.Context, key string, value any, TTL int64) error {
+	return s.rdb.Set(ctx, key, value, time.Duration(TTL)*time.Hour).Err()
+}
+
+func (s *RedisSessionService) GetUserSession(ctx context.Context, key string) (any, error) {
+	return s.rdb.Get(ctx, key).Result()
 }

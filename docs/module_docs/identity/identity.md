@@ -74,8 +74,8 @@ internal/platform/outbox/ ← ✅ Transactional Outbox implementation
 | **Domain không biết DB**             | Repo interface ở domain, implementation ở infra                                                                                |
 | **Transaction boundary ở App layer** | `tx.TxManager.WithinTransaction()` → `tx.GetExecutor(ctx, pool)`                                                               |
 | **Ports & Adapters**                 | App layer phụ thuộc vào interface (`ports/`), infra cung cấp implementation                                                    |
-| **Transactional Outbox**            | Đảm bảo tính nhất quán giữa DB và Kafka. Event được ghi vào DB cùng transaction với nghiệp vụ.                                |
-| **Idempotency**                     | Sử dụng `Idempotency-Key` header và Redis để chống duplicate request (đặc biệt quan trọng cho Register).                      |
+| **Transactional Outbox**             | Đảm bảo tính nhất quán giữa DB và Kafka. Event được ghi vào DB cùng transaction với nghiệp vụ.                                 |
+| **Idempotency**                      | Sử dụng `Idempotency-Key` header và Redis để chống duplicate request (đặc biệt quan trọng cho Register).                       |
 | **Platform vs Module separation**    | Logic không gắn business (crypto, JWT, Redis token) ở `platform/auth/`; chỉ adapters identity-specific mới ở `infra/adapters/` |
 | **Credential tách riêng**            | `Credential` entity độc lập, không bao giờ serialize ra ngoài                                                                  |
 | **Refresh token không lưu raw**      | Chỉ lưu hash SHA-256(random hex 32 bytes) vào DB                                                                               |
@@ -220,22 +220,25 @@ CREATE TABLE IF NOT EXISTS user_devices (
 
 ```sql
 CREATE TABLE IF NOT EXISTS user_sessions (
-  id                 BIGSERIAL    PRIMARY KEY,
-  user_id            BIGINT       NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  device_id          BIGINT       REFERENCES user_devices(id) ON DELETE SET NULL,
-  refresh_token_hash TEXT         NOT NULL,
-  session_status     VARCHAR(20)  NOT NULL DEFAULT 'active'
-                       CHECK (session_status IN ('active', 'revoked', 'expired')),
-  expires_at         TIMESTAMPTZ  NOT NULL,
-  ip_address         INET,
-  user_agent         TEXT,
-  last_seen_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  revoked_at         TIMESTAMPTZ,
-  revoked_reason     VARCHAR(255),
-  created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  id BIGSERIAL PRIMARY KEY,
+  -- 1. Ràng buộc cứng: Session phải thuộc về User và Device
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  device_id BIGINT NOT NULL REFERENCES user_devices(id) ON DELETE CASCADE,
 
-  UNIQUE(refresh_token_hash)
+  refresh_token_hash TEXT NOT NULL,
+  session_status VARCHAR(20) NOT NULL DEFAULT 'active' CHECK (session_status IN ('active', 'revoked', 'expired')),
+  expires_at TIMESTAMPTZ NOT NULL,
+  ip_address VARCHAR(45),
+  user_agent TEXT,
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  revoked_at TIMESTAMPTZ,
+  revoked_reason VARCHAR(255),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- 2. Chốt chặn bảo mật & Tra cứu siêu tốc độ cho API /refresh-token
+  UNIQUE(refresh_token_hash),
+  -- 3. Phục vụ Upsert: Đảm bảo 1 thiết bị của 1 user chỉ duy trì đúng 1 Session
+  UNIQUE(user_id, device_id)
 );
 ```
 
@@ -248,21 +251,27 @@ CREATE INDEX idx_user_sessions_expires_at ON user_sessions(expires_at);
 
 **Trigger:** `trg_user_sessions_update_updated_at`
 
-| Column               | Type         | Nullable | Default  | Ghi chú                                  |
-| -------------------- | ------------ | -------- | -------- | ---------------------------------------- |
-| `id`                 | BIGSERIAL    | NOT NULL | auto     | PK                                       |
-| `user_id`            | BIGINT       | NOT NULL | —        | FK → users(id)                           |
-| `device_id`          | BIGINT       | NULL     | —        | FK → user_devices(id) ON DELETE SET NULL |
-| `refresh_token_hash` | TEXT         | NOT NULL | —        | SHA-256 hash, UNIQUE                     |
-| `session_status`     | VARCHAR(20)  | NOT NULL | `active` | active / revoked / expired               |
-| `expires_at`         | TIMESTAMPTZ  | NOT NULL | —        | Thời điểm hết hạn session                |
-| `ip_address`         | INET         | NULL     | —        | IP của client                            |
-| `user_agent`         | TEXT         | NULL     | —        | Browser/app user agent                   |
-| `last_seen_at`       | TIMESTAMPTZ  | NOT NULL | NOW()    |                                          |
-| `revoked_at`         | TIMESTAMPTZ  | NULL     | —        | NULL = chưa bị thu hồi                   |
-| `revoked_reason`     | VARCHAR(255) | NULL     | —        |                                          |
-| `created_at`         | TIMESTAMPTZ  | NOT NULL | NOW()    |                                          |
-| `updated_at`         | TIMESTAMPTZ  | NOT NULL | NOW()    | auto-trigger                             |
+| Column               | Type         | Nullable | Default  | Ghi chú                                 |
+| -------------------- | ------------ | -------- | -------- | --------------------------------------- |
+| `id`                 | BIGSERIAL    | NOT NULL | auto     | PK                                      |
+| `user_id`            | BIGINT       | NOT NULL | —        | FK → users(id) ON DELETE CASCADE        |
+| `device_id`          | BIGINT       | NOT NULL | —        | FK → user_devices(id) ON DELETE CASCADE |
+| `refresh_token_hash` | TEXT         | NOT NULL | —        | SHA-256 hash, UNIQUE                    |
+| `session_status`     | VARCHAR(20)  | NOT NULL | `active` | active / revoked / expired              |
+| `expires_at`         | TIMESTAMPTZ  | NOT NULL | —        | Thời điểm hết hạn session               |
+| `ip_address`         | VARCHAR(45)  | NULL     | —        | IP của client                           |
+| `user_agent`         | TEXT         | NULL     | —        | Browser/app user agent                  |
+| `last_seen_at`       | TIMESTAMPTZ  | NOT NULL | NOW()    |                                         |
+| `revoked_at`         | TIMESTAMPTZ  | NULL     | —        | NULL = chưa bị thu hồi                  |
+| `revoked_reason`     | VARCHAR(255) | NULL     | —        |                                         |
+| `created_at`         | TIMESTAMPTZ  | NOT NULL | NOW()    |                                         |
+| `updated_at`         | TIMESTAMPTZ  | NOT NULL | NOW()    | auto-trigger                            |
+
+**Lưu ý:**
+
+- UNIQUE `(refresh_token_hash)` phục vụ tra cứu nhanh.
+- UNIQUE `(user_id, device_id)` đảm bảo mỗi thiết bị chỉ có tối đa 1 session active (phục vụ Upsert logic).
+- `ON DELETE CASCADE` trên cả `user_id` và `device_id` đảm bảo session bị dọn dẹp khi user hoặc device bị xóa.
 
 **Session lifetime:** Rotate mỗi lần refresh → `expires_at += 30 ngày` (xem `Session.Rotate()`).
 
@@ -1058,16 +1067,17 @@ internal/bootstrap/providers.go
 ---
 
 ## 11. HTTP API Specification
- 
- ### 11.1 Auth API
- 
- #### POST `/api/v1/auth/register`
- - **Description**: Đăng ký tài khoản mới.
- - **Headers**:
- - `Idempotency-Key`: (String, Required) UUID dùng để chống trùng lặp request.
- - **Body**: `RegisterRequest`
- - **Response (201)**: `REGISTER_SUCCESS`
- - Headers: `X-Idempotency-Replayed: true` (nếu request được phục hồi từ Redis).
+
+### 11.1 Auth API
+
+#### POST `/api/v1/auth/register`
+
+- **Description**: Đăng ký tài khoản mới.
+- **Headers**:
+- `Idempotency-Key`: (String, Required) UUID dùng để chống trùng lặp request.
+- **Body**: `RegisterRequest`
+- **Response (201)**: `REGISTER_SUCCESS`
+- Headers: `X-Idempotency-Replayed: true` (nếu request được phục hồi từ Redis).
 
 ---
 
@@ -1095,15 +1105,15 @@ Tất cả lỗi domain được định nghĩa trong `domain/error/errors.go`:
 
 Module identity phụ thuộc vào các platform packages:
 
-| Package           | Vai trò                                                            |
-| ----------------- | ------------------------------------------------------------------ |
-| `platform/auth`   | `*auth.Auth` giữ cho HTTP middleware — validate access token       |
-| `platform/tx`     | `TxManager` interface + `*Manager` impl + `GetExecutor(ctx, pool)` |
-| `platform/db`     | pgxpool connection pool                                            |
-| `platform/redis`  | `*goredis.Client` — dùng cho verification token và Idempotency |
-| `platform/config` | JWT config (secret, AccessTokenTTL, RefreshTokenTTL, BcryptCost)   |
-| `platform/outbox` | Implement Transactional Outbox pattern                           |
-| `platform/idempotency` | Middleware và Service quản lý tính idempotent cho API        |
+| Package                | Vai trò                                                            |
+| ---------------------- | ------------------------------------------------------------------ |
+| `platform/auth`        | `*auth.Auth` giữ cho HTTP middleware — validate access token       |
+| `platform/tx`          | `TxManager` interface + `*Manager` impl + `GetExecutor(ctx, pool)` |
+| `platform/db`          | pgxpool connection pool                                            |
+| `platform/redis`       | `*goredis.Client` — dùng cho verification token và Idempotency     |
+| `platform/config`      | JWT config (secret, AccessTokenTTL, RefreshTokenTTL, BcryptCost)   |
+| `platform/outbox`      | Implement Transactional Outbox pattern                             |
+| `platform/idempotency` | Middleware và Service quản lý tính idempotent cho API              |
 
 **Token lifetimes:**
 

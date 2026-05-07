@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/duclm99/bookstore-backend-v2/internal/modules/identity/domain/policy"
 	value_object "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/domain/value_object"
 	"github.com/duclm99/bookstore-backend-v2/internal/platform/tx"
+	"go.uber.org/zap"
 )
 
 type AuthService struct {
@@ -29,6 +31,7 @@ type AuthService struct {
 	passwordHasher ports.PasswordHasher
 	tokenManager   ports.TokenManager
 	verifyTokenSvc ports.VerificationTokenService
+	redisSession   ports.RedisSessionService
 	eventPublisher ports.EventPublisher
 	clock          ports.Clock
 	registerPolicy policy.RegisterPolicy
@@ -45,6 +48,7 @@ func NewAuthService(
 	passwordHasher ports.PasswordHasher,
 	tokenManager ports.TokenManager,
 	verifyTokenSvc ports.VerificationTokenService,
+	redisSession ports.RedisSessionService,
 	eventPublisher ports.EventPublisher,
 	clock ports.Clock,
 	registerPolicy policy.RegisterPolicy,
@@ -60,6 +64,7 @@ func NewAuthService(
 		passwordHasher: passwordHasher,
 		tokenManager:   tokenManager,
 		verifyTokenSvc: verifyTokenSvc,
+		redisSession:   redisSession,
 		eventPublisher: eventPublisher,
 		clock:          clock,
 		registerPolicy: registerPolicy,
@@ -94,14 +99,14 @@ func (s *AuthService) Register(ctx context.Context, cmd command.RegisterCommand)
 		Email:           email,
 		FullName:        strings.TrimSpace(cmd.FullName),
 		Phone:           normalizeOptionalString(cmd.Phone),
-		UserType:        "customer",
+		UserType:        string(entity.UserTypeCustomer),
 		Status:          value_object.UserStatusPendingVerification,
 		EmailVerifiedAt: nil,
 		Version:         1,
 	}
 	credential := &entity.Credential{
 		PasswordHash:      hashedPassword,
-		PasswordAlgo:      "bcrypt",
+		PasswordAlgo:      entity.PasswordAlgoBcrypt,
 		PasswordChangedAt: now,
 		FailedLoginCount:  0,
 		LastFailedLoginAt: nil,
@@ -167,14 +172,14 @@ func (s *AuthService) Login(ctx context.Context, cmd command.LoginCommand) (*dto
 	}
 	// 6. Verify device
 	now := s.clock.Now()
-	var deviceID *int64
-	if cmd.DeviceFingerprint != nil && strings.TrimSpace(*cmd.DeviceFingerprint) != "" {
+	var deviceID int64
+	if cmd.DeviceFingerprint != "" {
 		activeDevice, err := s.devices.ListActiveByUserID(ctx, user.ID)
 		if err != nil {
 			return nil, err
 		}
 		// Get device by Finger print from DB
-		existDevice, err := s.devices.GetByFingerprint(ctx, user.ID, strings.TrimSpace(*cmd.DeviceFingerprint))
+		existDevice, err := s.devices.GetByFingerprint(ctx, user.ID, strings.TrimSpace(cmd.DeviceFingerprint))
 		if err != nil {
 			return nil, err
 		}
@@ -187,8 +192,8 @@ func (s *AuthService) Login(ctx context.Context, cmd command.LoginCommand) (*dto
 		// Define a device entity to save DB
 		device := &entity.Device{
 			UserID:      user.ID,
-			Fingerprint: strings.TrimSpace(*cmd.DeviceFingerprint),
-			Label:       derefOrEmpty(cmd.DeviceLabel),
+			Fingerprint: strings.TrimSpace(cmd.DeviceFingerprint),
+			Label:       cmd.DeviceLabel,
 			FirstSeenAt: now,
 			LastSeenAt:  now,
 		}
@@ -203,7 +208,7 @@ func (s *AuthService) Login(ctx context.Context, cmd command.LoginCommand) (*dto
 		if err := s.devices.Upsert(ctx, device); err != nil {
 			return nil, err
 		}
-		deviceID = &device.ID
+		deviceID = device.ID
 	}
 
 	// 7. Create access token
@@ -211,7 +216,7 @@ func (s *AuthService) Login(ctx context.Context, cmd command.LoginCommand) (*dto
 		UserID: user.ID,
 		Email:  user.Email.String(),
 		Role:   user.UserType,
-		Type:   "access",
+		Type:   entity.AccessTokenTypeAccess,
 	})
 	if err != nil {
 		return nil, err
@@ -223,92 +228,183 @@ func (s *AuthService) Login(ctx context.Context, cmd command.LoginCommand) (*dto
 		return nil, err
 	}
 
-	// 9. Create session entity to save DB
+	// 9. DỌN DẸP REDIS (BƯỚC CHỐNG RÒ RỈ TOKEN)
+	// Nếu user login lại trên cùng 1 device, ta phải tìm session cũ và xóa nó khỏi Redis
+	// để đảm bảo Refresh Token cũ lập tức bị vô hiệu hóa.
+	if deviceID != 0 {
+		oldSession, err := s.sessions.GetByDeviceID(ctx, user.ID, deviceID)
+		if err == nil && oldSession != nil {
+			oldRedisKey := ports.RedisSessionKeyPrefix + string(oldSession.RefreshTokenHash)
+			err = s.redisSession.DeleteSession(ctx, oldRedisKey)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// 10. Create session entity to save DB
+	ttlDuration := time.Duration(s.devicePolicy.MaxSessionTTL) * 24 * time.Hour
 	session := &entity.Session{
 		UserID:           user.ID,
 		DeviceID:         deviceID,
 		RefreshTokenHash: hashToken(rawRefreshToken),
-		SessionStatus:    "active",
-		ExpiredAt:        now.Add(time.Duration(s.devicePolicy.MaxSessionTTL) * 24 * time.Hour),
-		IPAddress:        cmd.IPAddress,
+		SessionStatus:    string(entity.AccountStatusActive),
+		ExpiredAt:        now.Add(ttlDuration),
+		IPAddress:        &cmd.IPAddress,
 		UserAgent:        cmd.UserAgent,
 		LastSeenAt:       now,
 	}
-	// 10. Save session to DB
-	if err := s.sessions.Insert(ctx, session); err != nil {
+
+	// 11. Save session to DB
+	if err := s.sessions.Upsert(ctx, session); err != nil {
 		return nil, err
 	}
+
+	// 12. LƯU VÀO REDIS CÙNG VỚI TTL
+	// Chuyển struct thành JSON để lưu vào Redis
+	sessionJSON, err := json.Marshal(session)
+	if err == nil {
+		newRedisKey := ports.RedisSessionKeyPrefix + session.RefreshTokenHash
+		// Redis sẽ tự động xóa key này sau ttlDuration (VD: 30 ngày)
+		err = s.redisSession.SetUserSession(ctx, newRedisKey, sessionJSON, int64(s.devicePolicy.MaxSessionTTL))
+		if err != nil {
+			// Chỉ log warning, vì DB đã lưu thành công, không chặn luồng đăng nhập
+			zap.L().Warn("identity:Failed to save session to Redis", zap.Error(err))
+		}
+	}
+
 	// 11. Return data to http layer
 	return &dto.LoginOutput{
-		AccessToken:  accessToken,
-		RefreshToken: rawRefreshToken,
-		ExpiresAt:    expiredAt,
+		AccessToken:           accessToken,
+		RefreshToken:          rawRefreshToken,
+		AccessTokenExpiresAt:  expiredAt,
+		RefreshTokenExpiresAt: session.ExpiredAt,
 	}, nil
 }
 
 func (s *AuthService) RefreshToken(ctx context.Context, cmd command.RefreshTokenCommand) (*dto.RefreshTokenOutput, error) {
 	oldHash := hashToken(cmd.RefreshToken)
+	redisKey := ports.RedisSessionKeyPrefix + oldHash
 	now := s.clock.Now()
 
-	var newRawRefreshToken string
-	var newAccessToken string
-	var newAccessExpiry time.Time
+	var session *entity.Session
 
-	err := s.txManager.WithinTransaction(ctx, func(txCtx context.Context) error {
-		// 1. Get session by hashed refresh token from DB
-		session, err := s.sessions.GetByRefreshTokenHashForUpdate(txCtx, oldHash)
+	// ==========================================
+	// 1. CACHE-ASIDE: KIỂM TRA REDIS TRƯỚC
+	// ==========================================
+	sessionJSON, err := s.redisSession.GetUserSession(ctx, redisKey) // Trả về chuỗi JSON nếu có
+	if err == nil && sessionJSON != nil {
+		// HIT CACHE: Tuyệt vời! Bỏ qua truy vấn tìm Session ở DB
+		session = &entity.Session{}
+		if err := json.Unmarshal([]byte(sessionJSON.(string)), session); err != nil {
+			return nil, err
+		}
+	} else {
+		// MISS CACHE: Không có trong Redis -> Chọc xuống DB để dự phòng
+		session, err = s.sessions.GetByRefreshTokenHash(ctx, oldHash)
 		if err != nil {
-			return err
+			return nil, err_domain.ErrInvalidCredentials // Trả về 401 Unauthorized
 		}
+	}
 
-		// 2. Check if revoked
-		if session.IsRevoked() {
-			return err_domain.ErrSessionRevoked
-		}
+	// ==========================================
+	// 2. VALIDATE TRẠNG THÁI SESSION
+	// ==========================================
+	if session.IsRevoked() || session.SessionStatus != string(entity.AccountStatusActive) {
+		return nil, err_domain.ErrSessionRevoked
+	}
+	if session.IsExpired(now) {
+		return nil, err_domain.ErrSessionExpired
+	}
 
-		// 3. Check if expired
-		if session.IsExpired(now) {
-			return err_domain.ErrSessionExpired
-		}
+	// ==========================================
+	// 3. CHUẨN BỊ THÔNG TIN USER (ĐỂ TẠO ACCESS TOKEN)
+	// ==========================================
+	// Dù lấy từ Redis siêu nhanh, ta vẫn cần Email/Role của User để nhét vào JWT.
+	// (Lệnh GetByID qua Primary Key chạy chỉ tốn khoảng 1-2ms nên rất an toàn)
+	user, err := s.users.GetByID(ctx, session.UserID)
+	if err != nil {
+		return nil, err
+	}
 
-		// 4. Get user from DB
-		user, err := s.users.GetByID(txCtx, session.UserID)
+	// ==========================================
+	// 4. SINH CẶP TOKEN MỚI TRƯỚC KHI VÀO TRANSACTION
+	// ==========================================
+	newRawRefreshToken, err := s.tokenManager.GenerateRefreshToken(ctx, user.ID)
+	if err != nil {
+		return nil, err
+	}
+	newHash := hashToken(newRawRefreshToken)
+
+	newAccessToken, newAccessExpiry, err := s.tokenManager.GenerateAccessToken(ctx, ports.AccessTokenClaims{
+		UserID: user.ID,
+		Email:  user.Email.String(),
+		Role:   user.UserType,
+		Type:   entity.AccessTokenTypeAccess,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// ==========================================
+	// 5. TRANSACTION: ROTATE TOKEN DƯỚI DB
+	// ==========================================
+	err = s.txManager.WithinTransaction(ctx, func(txCtx context.Context) error {
+		// BƯỚC CHỐNG DOUBLE-CLICK (Race Condition):
+		// Phải SELECT ... FOR UPDATE để khóa dòng này lại. Nếu user bấm refresh 2 lần
+		// cùng lúc, Request số 2 sẽ bị chặn ở đây vì token cũ đã bị đổi ở Request 1.
+		sessionForUpdate, err := s.sessions.GetByRefreshTokenHashForUpdate(txCtx, oldHash)
 		if err != nil {
+			return err_domain.ErrInvalidCredentials // Bị kẻ khác/request khác dùng mất rồi
+		}
+
+		// Rotate session (Đổi hash mới, gia hạn thêm thời gian sống)
+		sessionForUpdate.Rotate(newHash, now)
+		sessionForUpdate.ExpiredAt = now.Add(time.Duration(s.devicePolicy.MaxSessionTTL) * 24 * time.Hour)
+
+		// Lưu xuống DB
+		if err := s.sessions.Update(txCtx, sessionForUpdate); err != nil {
 			return err
 		}
 
-		// 5. Generate new refresh token
-		newRawRefreshToken, err = s.tokenManager.GenerateRefreshToken(txCtx, user.ID)
-		if err != nil {
-			return err
-		}
-
-		// 6. Rotate session
-		session.Rotate(hashToken(newRawRefreshToken), now)
-
-		// 7. Save session to DB
-		if err := s.sessions.Update(txCtx, session); err != nil {
-			return err
-		}
-
-		// 8. Generate new access token
-		newAccessToken, newAccessExpiry, err = s.tokenManager.GenerateAccessToken(txCtx, ports.AccessTokenClaims{
-			UserID: user.ID,
-			Email:  user.Email.String(),
-			Role:   user.UserType,
-			Type:   "access",
-		})
-		return err
+		// Gán lại ra biến ngoài để Lên Redis ở bước 6
+		session = sessionForUpdate
+		return nil
 	})
 
 	if err != nil {
 		return nil, err
 	}
 
+	// ==========================================
+	// 6. ĐỒNG BỘ NGƯỢC LÊN REDIS (Sync Cache)
+	// ==========================================
+	// Xóa cái hash cũ đi để không ai dùng được nữa
+	s.redisSession.DeleteSession(ctx, redisKey)
+
+	// Đẩy cái session với hash mới lên lại Redis
+	newRedisKey := ports.RedisSessionKeyPrefix + newHash
+	newSessionJSON, _ := json.Marshal(session)
+
+	// Tính thời gian sống (TTL) của Redis đúng bằng khoảng thời gian token hết hạn
+	ttl := time.Until(session.ExpiredAt)
+
+	// Dùng Goroutine đẩy lên Redis ngầm (Fire and Forget) để API phản hồi ngay lập tức cho User
+	go func() {
+		// Lưu ý: Trong thực tế nên dùng một context riêng (background context)
+		// cho goroutine để không bị chết khi request ctx bị timeout.
+		bgCtx := context.Background()
+		s.redisSession.SetUserSession(bgCtx, newRedisKey, newSessionJSON, int64(ttl))
+	}()
+
+	// ==========================================
+	// 7. TRẢ KẾT QUẢ VỀ CLIENT
+	// ==========================================
 	return &dto.RefreshTokenOutput{
-		AccessToken:  newAccessToken,
-		RefreshToken: newRawRefreshToken,
-		ExpiresAt:    newAccessExpiry,
+		AccessToken:           newAccessToken,
+		RefreshToken:          newRawRefreshToken,
+		AccessTokenExpiresAt:  newAccessExpiry,
+		RefreshTokenExpiresAt: session.ExpiredAt, // Client biết khi nào thì phải login lại
 	}, nil
 }
 

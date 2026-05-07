@@ -8,10 +8,10 @@ type RegisterRequest struct {
 }
 
 type LoginRequest struct {
-	Email             string  `json:"email" binding:"required,email"`
-	Password          string  `json:"password" binding:"required"`
-	DeviceFingerprint *string `json:"device_fingerprint"`
-	DeviceLabel       *string `json:"device_label"`
+	Email             string `json:"email" binding:"required,email"`
+	Password          string `json:"password" binding:"required"`
+	DeviceFingerprint string `json:"device_fingerprint" binding:"required"`
+	DeviceLabel       string `json:"device_label" binding:"required"`
 }
 
 type RefreshTokenRequest struct {

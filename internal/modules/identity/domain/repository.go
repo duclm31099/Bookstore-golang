@@ -42,6 +42,9 @@ type SessionRepository interface {
 	Revoke(ctx context.Context, id int64, userID int64, revokedAt time.Time) error
 	GetByRefreshTokenHashForUpdate(ctx context.Context, hash string) (*entity.Session, error)
 	RevokeAllByUserID(ctx context.Context, userID int64, revokedAt time.Time) error
+
+	GetByDeviceID(ctx context.Context, userID int64, deviceID int64) (*entity.Session, error)
+	Upsert(ctx context.Context, session *entity.Session) error
 }
 
 // DeviceRepository
