@@ -36,15 +36,13 @@ func InitializeAPIApp() (*APIApp, func(), error) {
 	sessionRepository := postgres.NewSessionRepository(pool)
 	deviceRepository := postgres.NewDeviceRepository(pool)
 	queryRepository := postgres.NewQueryRepository(pool)
-	passwordHasher := adapters.ProvideBcryptHasher(config)
-	tokenManager := adapters.ProvideJWTTokenManager(config)
+	authManager := adapters.ProvideJWTAuthManager(config)
 	client, cleanup3, err := ProvideRedis(config)
 	if err != nil {
 		cleanup2()
 		cleanup()
 		return nil, nil, err
 	}
-	verificationTokenService := adapters.ProvideRedisVerificationTokenService(client)
 	redisSessionService := adapters.ProvideRedisSessionService(client)
 	postgresRepository := outbox.ProvideRepository(pool)
 	outboxRecorder := outbox.ProvideRecorder(postgresRepository)
@@ -52,7 +50,7 @@ func InitializeAPIApp() (*APIApp, func(), error) {
 	clock := adapters.ProvideRealClock()
 	registerPolicy := service.ProvideRegisterPolicy()
 	devicePolicy := service.ProvideDevicePolicy()
-	authService := service.NewAuthService(txManager, userRepository, credentialRepository, sessionRepository, deviceRepository, queryRepository, passwordHasher, tokenManager, verificationTokenService, redisSessionService, eventPublisher, clock, registerPolicy, devicePolicy)
+	authService := service.NewAuthService(txManager, userRepository, credentialRepository, sessionRepository, deviceRepository, queryRepository, authManager, redisSessionService, eventPublisher, clock, registerPolicy, devicePolicy)
 	authHandler := http.NewAuthHandler(authService)
 	profileService := service.NewProfileService(txManager, userRepository, deviceRepository, queryRepository, sessionRepository, clock)
 	profileHandler := http.NewProfileHandler(profileService)

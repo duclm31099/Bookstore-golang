@@ -13,18 +13,8 @@ import (
 const emailVerifyPrefix = "identity:email_verify:"
 const emailVerifyTTL = 24 * time.Hour
 
-// RedisVerificationTokenService lưu và xác thực email verification token trong Redis.
-// Token là single-use: GetDel đảm bảo không dùng lại được (chống replay attack).
-type RedisVerificationTokenService struct {
-	rdb *go_redis.Client
-}
-
-func NewRedisVerificationTokenService(rdb *go_redis.Client) *RedisVerificationTokenService {
-	return &RedisVerificationTokenService{rdb: rdb}
-}
-
-// IssueEmailVerificationToken tạo random token, lưu vào Redis với TTL 24h.
-func (s *RedisVerificationTokenService) IssueEmailVerificationToken(ctx context.Context, userID int64) (string, error) {
+// IssueVerifyToken tạo random token, lưu vào Redis với TTL 24h.
+func (s *RedisSessionService) IssueVerifyToken(ctx context.Context, userID int64) (string, error) {
 	rawToken, err := generateSecureToken()
 	if err != nil {
 		return "", fmt.Errorf("generate verify token: %w", err)
@@ -42,8 +32,8 @@ func (s *RedisVerificationTokenService) IssueEmailVerificationToken(ctx context.
 	return rawToken, nil
 }
 
-// ParseEmailVerificationToken lấy và xóa token khỏi Redis trong một thao tác (GetDel).
-func (s *RedisVerificationTokenService) ParseEmailVerificationToken(ctx context.Context, token string) (int64, error) {
+// ParseVerifyToken lấy và xóa token khỏi Redis trong một thao tác (GetDel).
+func (s *RedisSessionService) ParseVerifyToken(ctx context.Context, token string) (int64, error) {
 	key := emailVerifyPrefix + token
 
 	// Sử dụng Result() thay vì Bytes() để lấy thẳng ra chuỗi string

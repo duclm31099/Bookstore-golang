@@ -16,9 +16,9 @@ func RegisterRoutes(
 	{
 		auth.POST("/register", idempotencyMiddleware, authHandler.Register)
 		auth.POST("/login", idempotencyMiddleware, authHandler.Login)
-		auth.POST("/refresh", authHandler.RefreshToken)
+		auth.POST("/refresh-token", authMiddleware, idempotencyMiddleware, authHandler.RefreshToken)
 		auth.POST("/verify-email", idempotencyMiddleware, authHandler.VerifyEmail)
-		auth.POST("/logout", authMiddleware, authHandler.Logout)
+		auth.POST("/logout", authMiddleware, idempotencyMiddleware, authHandler.Logout)
 	}
 
 	me := api.Group("/me")

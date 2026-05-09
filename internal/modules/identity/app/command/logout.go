@@ -1,6 +1,6 @@
 package command
 
 type LogoutCommand struct {
-	SessionID int64
-	UserID    int64
+	DeviceID int64
+	UserID   int64
 }

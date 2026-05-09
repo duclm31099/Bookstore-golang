@@ -3,15 +3,16 @@ package http
 import (
 	"context"
 	"errors"
-	"log"
 	"net/http"
+	"time"
 
 	"github.com/duclm99/bookstore-backend-v2/internal/modules/identity/app/command"
 	"github.com/duclm99/bookstore-backend-v2/internal/modules/identity/app/dto"
 	identityerr "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/domain/error"
-	identitymw "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/http/middleware"
+	authMiddleware "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/http/middleware"
 	"github.com/duclm99/bookstore-backend-v2/internal/platform/httpx"
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 type AuthHandler struct {
@@ -50,10 +51,10 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	result := RegisterResponse{
 		UserID:  out.UserID,
 		Email:   out.Email,
-		Message: "Registration successful, please verify your email",
+		Message: RegisterSuccessMessage,
 	}
 
-	httpx.Success(c, http.StatusCreated, "REGISTER_SUCCESS", result)
+	httpx.Success(c, http.StatusCreated, RegisterSuccess, result)
 }
 
 func (h *AuthHandler) Login(c *gin.Context) {
@@ -69,7 +70,6 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		IPAddress:         c.ClientIP(),
 		UserAgent:         c.Request.UserAgent(),
 	}
-	log.Println("cmd login: ", cmd)
 
 	out, err := h.authService.Login(c.Request.Context(), cmd)
 	if err != nil {
@@ -81,53 +81,49 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		AccessToken: out.AccessToken,
 		ExpiresAt:   out.AccessTokenExpiresAt,
 	}
+	maxAge := int(time.Until(out.RefreshTokenExpiresAt).Seconds())
+	setCookie(c, out.RefreshToken, maxAge)
 
-	c.SetCookie(
-		"refresh_token",
-		out.RefreshToken,
-		int(out.RefreshTokenExpiresAt.Unix()),
-		"/api/v1/auth/refresh-token",
-		"",
-		false,
-		true)
-	httpx.Success(c, http.StatusOK, "LOGIN_SUCCESS", result)
+	httpx.Success(c, http.StatusOK, LoginSuccess, result)
 }
 
 func (h *AuthHandler) RefreshToken(c *gin.Context) {
-	var req RefreshTokenRequest
-	if !bindJSON(c, &req) {
+	refreshToken, err := c.Cookie(RefreshTokenCookieName)
+	if err != nil {
+		httpx.Error(c, http.StatusUnauthorized, NotAuthenticated, MissingRefreshTokenMessage)
 		return
 	}
 
 	out, err := h.authService.RefreshToken(c.Request.Context(), command.RefreshTokenCommand{
-		RefreshToken: req.RefreshToken,
+		RefreshToken: refreshToken,
 	})
 	if err != nil {
 		writeAuthError(c, err)
 		return
 	}
 
-	httpx.Success(c, http.StatusOK, "REFRESH_TOKEN_SUCCESS", out)
+	maxAge := int(time.Until(out.RefreshTokenExpiresAt).Seconds())
+	setCookie(c, out.RefreshToken, maxAge)
+
+	httpx.Success(c, http.StatusOK, RefreshTokenSuccess, RefreshTokenResponse{
+		AccessToken: out.AccessToken,
+		ExpiresAt:   out.AccessTokenExpiresAt,
+	})
 }
 
 func (h *AuthHandler) Logout(c *gin.Context) {
 	// 1. Lấy AuthContext để biết ai đang thao tác
-	authCtx, ok := identitymw.GetAuthContext(c)
+	authCtx, ok := authMiddleware.GetAuthContext(c)
+	zap.L().Info("AuthContext", zap.Any("authCtx", authCtx))
 	if !ok {
-		httpx.Error(c, http.StatusUnauthorized, "UNAUTHORIZED", "missing auth context")
-		return
-	}
-
-	// 2. Lấy SessionID từ JSON Body (Thay vì Query Parameter)
-	var req LogoutRequest // struct { SessionID int64 `json:"session_id" binding:"required"` }
-	if !bindJSON(c, &req) {
+		httpx.Error(c, http.StatusUnauthorized, NotAuthenticated, MissingAuthContextMessage)
 		return
 	}
 
 	// 3. KẸP CHẶT CẢ 2 XUỐNG SERVICE
 	err := h.authService.Logout(c.Request.Context(), command.LogoutCommand{
-		SessionID: req.SessionID,
-		UserID:    authCtx.UserID, // <--- ĐÂY LÀ CHÌA KHÓA CHỐNG HACK
+		DeviceID: authCtx.DeviceID,
+		UserID:   authCtx.UserID, // <--- ĐÂY LÀ CHÌA KHÓA CHỐNG HACK
 	})
 
 	if err != nil {
@@ -135,7 +131,7 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 		return
 	}
 
-	httpx.Success(c, http.StatusOK, "LOGOUT_SUCCESS", nil)
+	httpx.Success(c, http.StatusOK, LogoutSuccess, nil)
 }
 
 func (h *AuthHandler) VerifyEmail(c *gin.Context) {
@@ -152,12 +148,12 @@ func (h *AuthHandler) VerifyEmail(c *gin.Context) {
 		return
 	}
 
-	httpx.Success(c, http.StatusOK, "VERIFY_EMAIL_SUCCESS", nil)
+	httpx.Success(c, http.StatusOK, VerifyEmailSuccess, nil)
 }
 
 func bindJSON(c *gin.Context, req any) bool {
 	if err := c.ShouldBindJSON(req); err != nil {
-		httpx.Error(c, http.StatusUnprocessableEntity, "VALIDATION_ERROR", err.Error())
+		httpx.Error(c, http.StatusUnprocessableEntity, ValidationErr, err.Error())
 		return false
 	}
 	return true
@@ -180,4 +176,16 @@ func writeAuthError(c *gin.Context, err error) {
 	default:
 		httpx.Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 	}
+}
+
+func setCookie(c *gin.Context, refreshToken string, maxAge int) {
+	c.SetCookie(
+		RefreshTokenCookieName,
+		refreshToken,
+		maxAge,
+		RefreshTokenCookiePath,
+		RefreshTokenCookieDomain,
+		RefreshTokenCookieSecure, // Chú ý: Đổi thành true khi lên môi trường có HTTPS
+		RefreshTokenCookieHttpOnly,
+	)
 }

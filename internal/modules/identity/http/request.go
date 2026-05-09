@@ -1,5 +1,13 @@
 package http
 
+const (
+	RefreshTokenCookieName     = "refresh_token"
+	RefreshTokenCookiePath     = "/api/v1/auth/refresh-token"
+	RefreshTokenCookieDomain   = ""
+	RefreshTokenCookieSecure   = false
+	RefreshTokenCookieHttpOnly = true
+)
+
 type RegisterRequest struct {
 	Email    string  `json:"email" binding:"required,email,max=255"`
 	Password string  `json:"password" binding:"required,min=8,max=72"`
@@ -12,10 +20,6 @@ type LoginRequest struct {
 	Password          string `json:"password" binding:"required"`
 	DeviceFingerprint string `json:"device_fingerprint" binding:"required"`
 	DeviceLabel       string `json:"device_label" binding:"required"`
-}
-
-type RefreshTokenRequest struct {
-	RefreshToken string `json:"refresh_token" binding:"required"`
 }
 
 type VerifyEmailRequest struct {

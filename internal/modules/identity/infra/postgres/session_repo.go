@@ -41,8 +41,14 @@ const (
 
 	queryRevokeSession = `
 		UPDATE user_sessions 
-		SET revoked_at = COALESCE(revoked_at, $2)
-		WHERE id = $1 AND revoked_at IS NULL AND expires_at > $3 AND user_id = $4
+		SET 
+			revoked_at = $2,
+			session_status = 'revoked'
+		WHERE 
+			user_id = $3 
+			AND device_id = $1 
+			AND revoked_at IS NULL 
+			AND session_status = 'active'
 	`
 
 	queryRevokeAllByUserID = `
@@ -65,7 +71,7 @@ const (
 
 	queryUpsertSession = `
 		INSERT INTO user_sessions (user_id, device_id, refresh_token_hash, session_status, expires_at, ip_address, user_agent, last_seen_at)
-		VALUES ($1, $2, $3, $4, $5, $6::INET, $7, $8)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (user_id, device_id)
 		DO UPDATE SET
 			refresh_token_hash = EXCLUDED.refresh_token_hash,
@@ -73,7 +79,8 @@ const (
 			expires_at = EXCLUDED.expires_at,
 			ip_address = EXCLUDED.ip_address,
 			user_agent = EXCLUDED.user_agent,
-			last_seen_at = EXCLUDED.last_seen_at
+			last_seen_at = EXCLUDED.last_seen_at,
+			revoked_at = NULL
 		RETURNING id, created_at, updated_at
 	`
 )
@@ -163,10 +170,10 @@ func (r *SessionRepository) ListActiveByUserID(ctx context.Context, userID int64
 	return sessions, nil
 }
 
-func (r *SessionRepository) Revoke(ctx context.Context, id int64, userID int64, revokedAt time.Time) error {
+func (r *SessionRepository) Revoke(ctx context.Context, deviceID int64, userID int64, revokedAt time.Time) error {
 	db := tx.GetExecutor(ctx, r.pool)
 
-	result, err := db.Exec(ctx, queryRevokeSession, id, revokedAt, time.Now(), userID)
+	result, err := db.Exec(ctx, queryRevokeSession, deviceID, revokedAt, userID)
 	if err != nil {
 		return err
 	}

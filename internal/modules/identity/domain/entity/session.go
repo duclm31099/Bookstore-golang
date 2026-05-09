@@ -66,5 +66,5 @@ func (s *Session) isUseable(now time.Time) error {
 // Rotate dùng trong trường hợp single-rotate session
 func (s *Session) Rotate(newRefreshTokenHash string, now time.Time) {
 	s.RefreshTokenHash = newRefreshTokenHash
-	s.ExpiredAt = now.Add(30 * 24 * time.Hour)
+	s.LastSeenAt = now
 }
