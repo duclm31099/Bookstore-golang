@@ -18,30 +18,47 @@ func NewQueryRepository(pool *pgxpool.Pool) query.QueryRepository {
 }
 
 const (
+	// scanUser expects: id, email, full_name, phone, user_type, account_status,
+	// email_verified_at, last_login_at, locked_reason, metadata, version, created_at, updated_at
 	queryMe = `
-		SELECT id, email, full_name, status, email_verified_at, created_at
+		SELECT id, email, full_name, phone, user_type, account_status,
+			email_verified_at, last_login_at, locked_reason, metadata,
+			version, created_at, updated_at
 		FROM users
 		WHERE id = $1
 	`
 
+	// scanSession expects: id, user_id, device_id, refresh_token_hash, session_status,
+	// expires_at, ip_address, user_agent, last_seen_at, revoked_at, revoked_reason, created_at, updated_at
 	queryListSession = `
-		SELECT id, user_id, device_id, session_status, expires_at, ip_address, user_agent, last_seen_at, revoked_at, revoked_reason, created_at, updated_at
+		SELECT id, user_id, device_id, refresh_token_hash, session_status,
+			expires_at, ip_address, user_agent, last_seen_at,
+			revoked_at, revoked_reason, created_at, updated_at
 		FROM user_sessions
 		WHERE user_id = $1
 		ORDER BY created_at DESC
 	`
+
+	// scanDevice expects: id, user_id, fingerprint_hash, device_label, first_seen_at,
+	// last_seen_at, revoked_at, revoked_reason, metadata, created_at, updated_at
 	queryListDevice = `
-		SELECT id, user_id, fingerprint_hash, device_label, first_seen_at, last_seen_at, revoked_at
+		SELECT id, user_id, fingerprint_hash, device_label, first_seen_at,
+			last_seen_at, revoked_at, revoked_reason, metadata, created_at, updated_at
 		FROM user_devices
 		WHERE user_id = $1
 		ORDER BY created_at DESC
 	`
 
+	// scanAddress expects: id, user_id, recipient_name, recipient_phone,
+	// address_line1, address_line2, province_code, district_code, ward_code,
+	// postal_code, country_code, is_default, version, created_at, updated_at
 	queryListAddress = `
-		SELECT id, user_id, address_line_1, address_line_2, province_code, district_code, ward_code, postal_code, country_code, is_default
+		SELECT id, user_id, recipient_name, recipient_phone,
+			address_line1, address_line2, province_code, district_code, ward_code,
+			postal_code, country_code, is_default, version, created_at, updated_at
 		FROM addresses
 		WHERE user_id = $1
-		ORDER BY created_at DESC
+		ORDER BY is_default DESC, created_at DESC
 	`
 )
 

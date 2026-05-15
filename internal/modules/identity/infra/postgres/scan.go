@@ -74,6 +74,8 @@ func scanAddress(row pgx.Row) (*addressRow, error) {
 	err := row.Scan(
 		&r.ID,
 		&r.UserID,
+		&r.RecipientName,
+		&r.RecipientPhone,
 		&r.Line1,
 		&r.Line2,
 		&r.Province,

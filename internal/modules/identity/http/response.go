@@ -76,15 +76,17 @@ type MeResponse struct {
 }
 
 type AddressResponse struct {
-	ID           int64  `json:"id"`
-	Line1        string `json:"line1"`
-	Line2        string `json:"line2"`
-	ProvinceCode string `json:"province_code"`
-	DistrictCode string `json:"district_code"`
-	WardCode     string `json:"ward_code"`
-	PostalCode   string `json:"postal_code"`
-	CountryCode  string `json:"country_code"`
-	IsDefault    bool   `json:"is_default"`
+	ID             int64  `json:"id"`
+	RecipientName  string `json:"recipient_name"`
+	RecipientPhone string `json:"recipient_phone"`
+	Line1          string `json:"line1"`
+	Line2          string `json:"line2"`
+	ProvinceCode   string `json:"province_code"`
+	DistrictCode   string `json:"district_code"`
+	WardCode       string `json:"ward_code"`
+	PostalCode     string `json:"postal_code"`
+	CountryCode    string `json:"country_code"`
+	IsDefault      bool   `json:"is_default"`
 }
 
 type SessionResponse struct {

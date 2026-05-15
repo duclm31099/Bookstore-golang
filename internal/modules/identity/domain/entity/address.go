@@ -11,19 +11,21 @@ import (
 // Sau khi order đã tạo, address snapshot trong order không đổi
 // dù user xóa address này đi
 type Address struct {
-	ID          int64
-	UserID      int64
-	Line1       string
-	Line2       string
-	Province    string
-	District    string
-	Ward        string
-	PostalCode  string
-	CountryCode string
-	IsDefault   bool
-	Version     int64
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID             int64
+	UserID         int64
+	RecipientName  string
+	RecipientPhone string
+	Line1          string
+	Line2          string
+	Province       string
+	District       string
+	Ward           string
+	PostalCode     string
+	CountryCode    string
+	IsDefault      bool
+	Version        int64
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // AssertOwnership đảm bảo chỉ owner mới được mutate address

@@ -31,11 +31,13 @@ type DeviceView struct {
 }
 
 type AddressView struct {
-	ID        int64
-	Province  string
-	District  string
-	Ward      string
-	Line1     string
-	Line2     string
-	IsDefault bool
+	ID             int64
+	RecipientName  string
+	RecipientPhone string
+	Province       string
+	District       string
+	Ward           string
+	Line1          string
+	Line2          string
+	IsDefault      bool
 }

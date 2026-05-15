@@ -22,29 +22,39 @@ func NewAddressRepository(pool *pgxpool.Pool) domain.AddressRepository {
 
 const (
 	queryGetAddressByID = `
-		SELECT id, user_id, address_line1, address_line2, province_code, 
-			district_code, ward_code, postal_code, country_code, is_default
+		SELECT id, user_id, recipient_name, recipient_phone,
+			address_line1, address_line2, province_code,
+			district_code, ward_code, postal_code, country_code,
+			is_default, version, created_at, updated_at
 		FROM addresses
 		WHERE id = $1
 	`
 
 	queryListAddressByUserID = `
-		SELECT id, user_id, address_line1, address_line2, province_code, 
-			district_code, ward_code, postal_code, country_code, is_default
+		SELECT id, user_id, recipient_name, recipient_phone,
+			address_line1, address_line2, province_code,
+			district_code, ward_code, postal_code, country_code,
+			is_default, version, created_at, updated_at
 		FROM addresses
 		WHERE user_id = $1
 		ORDER BY is_default DESC, created_at DESC
 	`
 
 	queryInsertAddress = `
-		INSERT INTO addresses (user_id, address_line1, address_line2, province_code, district_code, ward_code, postal_code, country_code, is_default)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO addresses (
+			user_id, recipient_name, recipient_phone,
+			address_line1, address_line2, province_code,
+			district_code, ward_code, postal_code, country_code, is_default
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING id
 	`
 
 	queryUpdateAddress = `
 		UPDATE addresses
-		SET address_line1 = $2, address_line2 = $3, province_code = $4, district_code = $5, ward_code = $6, postal_code = $7, country_code = $8, is_default = $9
+		SET recipient_name = $2, recipient_phone = $3,
+			address_line1 = $4, address_line2 = $5,
+			province_code = $6, district_code = $7, ward_code = $8,
+			postal_code = $9, country_code = $10, is_default = $11
 		WHERE id = $1
 	`
 
@@ -107,7 +117,8 @@ func (r *AddressRepository) Insert(ctx context.Context, address *entity.Address)
 	executor := tx.GetExecutor(ctx, r.pool)
 
 	err := executor.QueryRow(ctx, queryInsertAddress,
-		address.UserID, address.Line1, address.Line2, address.Province,
+		address.UserID, address.RecipientName, address.RecipientPhone,
+		address.Line1, address.Line2, address.Province,
 		address.District, address.Ward, address.PostalCode, address.CountryCode,
 		address.IsDefault,
 	).Scan(&address.ID)
@@ -118,7 +129,8 @@ func (r *AddressRepository) Update(ctx context.Context, address *entity.Address)
 	executor := tx.GetExecutor(ctx, r.pool)
 
 	tag, err := executor.Exec(ctx, queryUpdateAddress,
-		address.ID, address.Line1, address.Line2, address.Province,
+		address.ID, address.RecipientName, address.RecipientPhone,
+		address.Line1, address.Line2, address.Province,
 		address.District, address.Ward, address.PostalCode, address.CountryCode,
 		address.IsDefault,
 	)

@@ -77,15 +77,17 @@ func (h *AddressHandler) AddAddress(c *gin.Context) {
 	}
 
 	id, err := h.addressUC.AddAddress(c.Request.Context(), command.AddAddressCommand{
-		UserID:       userID,
-		Line1:        req.Line1,
-		Line2:        req.Line2,
-		ProvinceCode: req.ProvinceCode,
-		DistrictCode: req.DistrictCode,
-		WardCode:     req.WardCode,
-		PostalCode:   req.PostalCode,
-		CountryCode:  req.CountryCode,
-		IsDefault:    req.IsDefault,
+		UserID:         userID,
+		RecipientName:  req.RecipientName,
+		RecipientPhone: req.RecipientPhone,
+		Line1:          req.Line1,
+		Line2:          req.Line2,
+		ProvinceCode:   req.ProvinceCode,
+		DistrictCode:   req.DistrictCode,
+		WardCode:       req.WardCode,
+		PostalCode:     req.PostalCode,
+		CountryCode:    req.CountryCode,
+		IsDefault:      req.IsDefault,
 	})
 	if err != nil {
 		writeAddressError(c, "ADD_ADDRESS_FAILED", err)
@@ -112,16 +114,18 @@ func (h *AddressHandler) UpdateAddress(c *gin.Context) {
 	}
 
 	if err := h.addressUC.UpdateAddress(c.Request.Context(), command.UpdateAddressCommand{
-		ID:           addrID,
-		UserID:       userID,
-		Line1:        req.Line1,
-		Line2:        req.Line2,
-		ProvinceCode: req.ProvinceCode,
-		DistrictCode: req.DistrictCode,
-		WardCode:     req.WardCode,
-		PostalCode:   req.PostalCode,
-		CountryCode:  req.CountryCode,
-		IsDefault:    req.IsDefault,
+		ID:             addrID,
+		UserID:         userID,
+		RecipientName:  req.RecipientName,
+		RecipientPhone: req.RecipientPhone,
+		Line1:          req.Line1,
+		Line2:          req.Line2,
+		ProvinceCode:   req.ProvinceCode,
+		DistrictCode:   req.DistrictCode,
+		WardCode:       req.WardCode,
+		PostalCode:     req.PostalCode,
+		CountryCode:    req.CountryCode,
+		IsDefault:      req.IsDefault,
 	}); err != nil {
 		writeAddressError(c, "UPDATE_ADDRESS_FAILED", err)
 		return

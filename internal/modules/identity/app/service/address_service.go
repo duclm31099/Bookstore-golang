@@ -28,15 +28,17 @@ func NewAddressService(
 func (s *AddressService) AddAddress(ctx context.Context, cmd command.AddAddressCommand) (int64, error) {
 
 	address := &entity.Address{
-		UserID:      cmd.UserID,
-		Line1:       strings.TrimSpace(cmd.Line1),
-		Line2:       strings.TrimSpace(cmd.Line2),
-		Province:    strings.TrimSpace(cmd.ProvinceCode),
-		District:    strings.TrimSpace(cmd.DistrictCode),
-		Ward:        strings.TrimSpace(cmd.WardCode),
-		PostalCode:  strings.TrimSpace(cmd.PostalCode),
-		CountryCode: strings.TrimSpace(cmd.CountryCode),
-		IsDefault:   cmd.IsDefault,
+		UserID:         cmd.UserID,
+		RecipientName:  strings.TrimSpace(cmd.RecipientName),
+		RecipientPhone: strings.TrimSpace(cmd.RecipientPhone),
+		Line1:          strings.TrimSpace(cmd.Line1),
+		Line2:          strings.TrimSpace(cmd.Line2),
+		Province:       strings.TrimSpace(cmd.ProvinceCode),
+		District:       strings.TrimSpace(cmd.DistrictCode),
+		Ward:           strings.TrimSpace(cmd.WardCode),
+		PostalCode:     strings.TrimSpace(cmd.PostalCode),
+		CountryCode:    strings.TrimSpace(cmd.CountryCode),
+		IsDefault:      cmd.IsDefault,
 	}
 
 	err := s.txManager.WithinTransaction(ctx, func(txCtx context.Context) error {
@@ -63,6 +65,8 @@ func (s *AddressService) UpdateAddress(ctx context.Context, cmd command.UpdateAd
 		return err
 	}
 
+	address.RecipientName = strings.TrimSpace(cmd.RecipientName)
+	address.RecipientPhone = strings.TrimSpace(cmd.RecipientPhone)
 	address.Line1 = strings.TrimSpace(cmd.Line1)
 	address.Line2 = strings.TrimSpace(cmd.Line2)
 	address.Province = strings.TrimSpace(cmd.ProvinceCode)

@@ -1,96 +1,144 @@
-# Module Identity — Schema & API Specification
+# Module Identity — Tài liệu kỹ thuật đầy đủ
 
-> **Phiên bản:** v1.2  
-> **Cập nhật:** 2026-05-04  
-> **Stack:** Go (pgx/v5), PostgreSQL 15+, Redis, Kafka, JWT, Bcrypt
+> **Phiên bản:** v2.0
+> **Cập nhật:** 2026-05-15
+> **Stack:** Go (pgx/v5), PostgreSQL 15+, Redis, JWT, Bcrypt
+> **Đối tượng:** Frontend developer muốn hiểu cách backend vận hành
 
 ---
 
 ## Mục lục
 
-1. [Tổng quan kiến trúc](#1-tổng-quan-kiến-trúc)
-2. [Database Schema](#2-database-schema)
-3. [Domain Model](#3-domain-model)
-4. [Value Objects & Enums](#4-value-objects--enums)
-5. [Domain Policies](#5-domain-policies)
-6. [Repository Interfaces](#6-repository-interfaces)
-7. [Query Layer (CQRS Read-side)](#7-query-layer-cqrs-read-side)
-8. [Application Services (Use Cases)](#8-application-services-use-cases)
-9. [Port Adapters (infra/adapters)](#9-port-adapters-infraadapters)
-10. [Dependency Injection & Wire](#10-dependency-injection--wire)
-11. [HTTP API Specification](#11-http-api-specification)
-12. [Error Catalogue](#12-error-catalogue)
-13. [Platform Dependencies](#13-platform-dependencies)
-14. [Ghi chú & Known Issues](#14-ghi-chú--known-issues)
+1. [Giới thiệu — Đọc trước nếu bạn là Frontend Dev](#1-giới-thiệu--đọc-trước-nếu-bạn-là-frontend-dev)
+2. [Tổng quan kiến trúc](#2-tổng-quan-kiến-trúc)
+3. [Database Schema](#3-database-schema)
+4. [Domain Model — Thực thể nghiệp vụ](#4-domain-model--thực-thể-nghiệp-vụ)
+5. [Value Objects & Enums](#5-value-objects--enums)
+6. [Domain Policies — Luật nghiệp vụ cứng](#6-domain-policies--luật-nghiệp-vụ-cứng)
+7. [Repository Interfaces — Hợp đồng với Database](#7-repository-interfaces--hợp-đồng-với-database)
+8. [Port Interfaces — Hợp đồng với Hạ tầng ngoài](#8-port-interfaces--hợp-đồng-với-hạ-tầng-ngoài)
+9. [Application Services — Các Use Case nghiệp vụ](#9-application-services--các-use-case-nghiệp-vụ)
+10. [HTTP Layer — Từ Request đến Response](#10-http-layer--từ-request-đến-response)
+11. [HTTP API Specification — Đặc tả đầy đủ](#11-http-api-specification--đặc-tả-đầy-đủ)
+12. [Bảo mật — Các cơ chế bảo vệ](#12-bảo-mật--các-cơ-chế-bảo-vệ)
+13. [Error Catalogue — Danh sách mã lỗi](#13-error-catalogue--danh-sách-mã-lỗi)
+14. [Dependency Injection & Wire](#14-dependency-injection--wire)
+15. [Platform Dependencies](#15-platform-dependencies)
 
 ---
 
-## 1. Tổng quan kiến trúc
+## 1. Giới thiệu — Đọc trước nếu bạn là Frontend Dev
 
-Module **identity** được tổ chức theo **Modular Monolith** với kiến trúc phân lớp rõ ràng:
+Nếu bạn đang quen với React/Vue và muốn hiểu backend hoạt động như thế nào, đây là những khái niệm cốt lõi bạn cần nắm trước khi đọc tiếp.
+
+### Backend làm gì mà Frontend không thấy?
+
+Khi bạn gọi `POST /api/v1/auth/login`, phía frontend chỉ thấy: gửi email + password → nhận về access token. Nhưng bên trong backend, có khoảng **10 bước** diễn ra theo thứ tự nghiêm ngặt:
+
+```
+[Request từ browser]
+      ↓
+[Middleware kiểm tra header, IP, rate limit]
+      ↓
+[Handler: parse JSON → validate → tạo Command object]
+      ↓
+[AuthService.Login(): điều phối nghiệp vụ]
+      ↓
+[UserRepository: truy vấn PostgreSQL]
+      ↓
+[PasswordHasher: so sánh bcrypt hash]
+      ↓
+[DeviceRepository: upsert device fingerprint]
+      ↓
+[TokenManager: tạo JWT access token + opaque refresh token]
+      ↓
+[SessionRepository: ghi session vào PostgreSQL]
+      ↓
+[RedisSessionService: cache session vào Redis]
+      ↓
+[Handler: set HTTP-only cookie + trả JSON response]
+      ↓
+[Response về browser]
+```
+
+### Tại sao có nhiều lớp như vậy?
+
+Câu trả lời ngắn: **để thay thế từng phần mà không ảnh hưởng phần còn lại**.
+
+Ví dụ: hôm nay dùng bcrypt để hash password, mai muốn đổi sang argon2id → chỉ cần đổi 1 file `BcryptHasher`, toàn bộ logic nghiệp vụ ở `AuthService` không cần chạm vào. Điều này gọi là **Dependency Inversion**.
+
+### Luồng dữ liệu: Frontend → Backend
+
+```
+Frontend gửi:  { "email": "...", "password": "..." }
+                        ↓
+Backend nhận:  LoginRequest  (validate JSON binding)
+                        ↓
+              LoginCommand  (plain struct, chuyển qua App layer)
+                        ↓
+              AuthService.Login(cmd)  (nghiệp vụ)
+                        ↓
+              LoginOutput  (DTO trả về)
+                        ↓
+Frontend nhận: { "access_token": "...", "expires_at": "..." }
+              + HTTP-only Cookie: refresh_token=...
+```
+
+---
+
+## 2. Tổng quan kiến trúc
+
+Module **identity** được tổ chức theo **Modular Monolith** với 4 tầng phân lớp rõ ràng:
 
 ```
 internal/modules/identity/
-├── domain/               ← Core business logic, entities, repo interfaces, policies
-│   ├── entity/
-│   ├── value_object/
-│   ├── policy/
-│   ├── error/
-│   └── repository.go
-├── app/                  ← Application layer (use cases)
-│   ├── command/
-│   ├── query/
-│   ├── service/          ← ✅ AuthService, ProfileService, AddressService
-│   ├── ports/            ← ✅ 5 port interfaces
-│   └── dto/
-├── infra/
-│   ├── postgres/         ← Repository implementations
-│   │   ├── rows.go / scan.go / mapper.go
-│   │   ├── *_repo.go (5 repos + query_repo)
-│   │   └── provider.go
-│   └── adapters/         ← ✅ Bridge layer (identity-specific adapters + thin wrappers)
-│       ├── outbox_event_publisher.go ← EventPublisher (Transaction Outbox)
-│       ├── real_clock.go           ← Clock
-│       └── provider.go             ← wire.ProviderSet + jwtTokenManagerBridge
-└── http/                 ← HTTP handlers (chưa implement)
-
-internal/platform/auth/               ← ✅ Platform-level auth implementations
-├── auth.go               ← *Auth (JWT validate cho HTTP middleware)
-├── bcrypt_hasher.go      ← BcryptHasher (password hashing)
-├── jwt_token_manager.go  ← JWTTokenManager + JWTClaims
-├── redis_verify_token.go ← RedisVerificationTokenService
-├── rand.go               ← generateSecureToken() helper
-└── idempotency/          ← Idempotency Middleware & Storage
-internal/platform/outbox/ ← ✅ Transactional Outbox implementation
-├── recorder.go           ← Ghi event vào DB
-├── dispatcher.go         ← Quét và publish lên Kafka
-└── postgres_repository.go
+├── domain/               ← Tầng 1: Quy tắc nghiệp vụ thuần túy
+│   ├── entity/           ← User, Credential, Session, Device, Address
+│   ├── value_object/     ← Email, UserStatus (có validation + state machine)
+│   ├── policy/           ← RegisterPolicy, DevicePolicy
+│   ├── error/            ← Mã lỗi chuẩn hóa
+│   └── repository.go     ← Hợp đồng interface với DB (không phải implementation)
+│
+├── app/                  ← Tầng 2: Điều phối use case
+│   ├── command/          ← Input structs cho thao tác ghi (Login, Register...)
+│   ├── query/            ← Input/Output cho thao tác đọc (CQRS-lite)
+│   ├── dto/              ← Output structs trả về HTTP layer
+│   ├── ports/            ← Hợp đồng với hạ tầng ngoài (Redis, JWT, Email...)
+│   └── service/          ← AuthService, ProfileService, AddressService
+│
+├── infra/                ← Tầng 3: Implementation thực tế
+│   ├── postgres/         ← Các Repository thực thi truy vấn SQL
+│   └── adapters/         ← Adapter cho JWT, Redis, Event Publisher
+│
+└── http/                 ← Tầng 4: Giao tiếp HTTP
+    ├── auth_handler.go   ← Xử lý request HTTP, gọi service
+    ├── request.go        ← JSON binding + validation rules
+    ├── response.go       ← Cấu trúc JSON response
+    ├── router.go         ← Khai báo routes, gán middleware
+    └── middleware/
+        ├── auth_middleware.go  ← Kiểm tra JWT Bearer token
+        └── strict_auth.go     ← Kiểm tra JTI blacklist (cho thao tác nhạy cảm)
 ```
 
-### Nguyên tắc thiết kế
+### Nguyên tắc thiết kế cốt lõi
 
-| Nguyên tắc                           | Áp dụng                                                                                                                        |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| **Domain không biết DB**             | Repo interface ở domain, implementation ở infra                                                                                |
-| **Transaction boundary ở App layer** | `tx.TxManager.WithinTransaction()` → `tx.GetExecutor(ctx, pool)`                                                               |
-| **Ports & Adapters**                 | App layer phụ thuộc vào interface (`ports/`), infra cung cấp implementation                                                    |
-| **Transactional Outbox**             | Đảm bảo tính nhất quán giữa DB và Kafka. Event được ghi vào DB cùng transaction với nghiệp vụ.                                 |
-| **Idempotency**                      | Sử dụng `Idempotency-Key` header và Redis để chống duplicate request (đặc biệt quan trọng cho Register).                       |
-| **Platform vs Module separation**    | Logic không gắn business (crypto, JWT, Redis token) ở `platform/auth/`; chỉ adapters identity-specific mới ở `infra/adapters/` |
-| **Credential tách riêng**            | `Credential` entity độc lập, không bao giờ serialize ra ngoài                                                                  |
-| **Refresh token không lưu raw**      | Chỉ lưu hash SHA-256(random hex 32 bytes) vào DB                                                                               |
-| **Verification token single-use**    | Redis `GetDel` đảm bảo token chỉ dùng được 1 lần                                                                               |
-| **Anti-corruption boundary**         | `rows.go` tách biệt DB shape khỏi domain entity                                                                                |
-| **CQRS read-side**                   | `QueryRepository` trả view model, không qua domain entity                                                                      |
-| **Clock injectable**                 | `ports.Clock` thay cho `time.Now()` trực tiếp → testable                                                                       |
+| Nguyên tắc | Ý nghĩa thực tế |
+|---|---|
+| **Domain không biết DB** | `entity.User` không có field `db:""` hay SQL. Nó chỉ có business logic. |
+| **Dependency Inversion** | `AuthService` phụ thuộc vào `interface`, không phải `*PostgresRepo` cụ thể |
+| **Transaction ở App layer** | `AuthService` quyết định khi nào mở/đóng transaction — không để DB tự quyết |
+| **Cache-aside pattern** | Đọc session từ Redis trước, nếu miss thì đọc DB, rồi cache lại Redis |
+| **Refresh token trong HTTP-only Cookie** | Browser không thể đọc cookie này qua JavaScript → chống XSS |
+| **JTI Blacklist** | Access token bị revoke ngay lập tức thay vì phải chờ hết hạn |
+| **Fail-closed security** | Nếu Redis lỗi khi kiểm tra blacklist → CHẶN request (không cho qua) |
 
 ---
 
-## 2. Database Schema
+## 3. Database Schema
 
-### 2.1 Bảng `users`
+### 3.1 Bảng `users`
 
-**Migration:** `000002_create_user_table.up.sql`
+Chứa thông tin cơ bản của người dùng. **Lưu ý quan trọng:** password KHÔNG được lưu ở đây.
 
 ```sql
 CREATE TABLE IF NOT EXISTS users (
@@ -112,42 +160,22 @@ CREATE TABLE IF NOT EXISTS users (
 );
 ```
 
-**Indexes:**
+> **Tại sao có field `version`?** Đây là kỹ thuật **Optimistic Locking**: khi 2 request đồng thời muốn cập nhật cùng 1 user, request nào gửi kèm `version` cũ hơn sẽ bị từ chối. Tránh ghi đè nhau.
 
-```sql
-CREATE INDEX idx_users_account_status    ON users(account_status);
-CREATE INDEX idx_users_user_type         ON users(user_type);
-CREATE INDEX idx_users_email_verified_at ON users(email_verified_at);
-```
-
-**Trigger:** `trg_users_update_updated_at` — tự động set `updated_at = NOW()` trước mỗi UPDATE.
-
-| Column              | Type         | Nullable | Default                | Ghi chú                         |
-| ------------------- | ------------ | -------- | ---------------------- | ------------------------------- |
-| `id`                | BIGSERIAL    | NOT NULL | auto                   | PK                              |
-| `email`             | VARCHAR(255) | NOT NULL | —                      | UNIQUE, normalized lowercase    |
-| `full_name`         | VARCHAR(255) | NOT NULL | —                      |                                 |
-| `phone`             | VARCHAR(20)  | NULL     | —                      |                                 |
-| `user_type`         | VARCHAR(30)  | NOT NULL | `customer`             | enum: customer, admin, operator |
-| `account_status`    | VARCHAR(30)  | NOT NULL | `pending_verification` | xem §4                          |
-| `email_verified_at` | TIMESTAMPTZ  | NULL     | —                      | NULL = chưa verify              |
-| `last_login_at`     | TIMESTAMPTZ  | NULL     | —                      |                                 |
-| `locked_reason`     | VARCHAR(255) | NULL     | —                      |                                 |
-| `metadata`          | JSONB        | NULL     | `{}`                   | Thông tin phụ trợ mở rộng       |
-| `version`           | BIGINT       | NOT NULL | 1                      | Optimistic locking              |
-| `created_at`        | TIMESTAMPTZ  | NOT NULL | NOW()                  |                                 |
-| `updated_at`        | TIMESTAMPTZ  | NOT NULL | NOW()                  | auto-trigger                    |
-
-> ✅ **Đã đồng bộ (v1.1):** Go constants được cập nhật để khớp với DB CHECK constraint:
->
-> - `UserStatusBanned = "locked"` (thay vì `"banned"`)
-> - `UserStatusSuspended = "disabled"` (thay vì `"suspended"`)
+| Column | Nullable | Ghi chú |
+|---|---|---|
+| `id` | NOT NULL | BIGSERIAL — tự tăng |
+| `email` | NOT NULL | UNIQUE, lowercase |
+| `user_type` | NOT NULL | `customer` / `admin` / `operator` |
+| `account_status` | NOT NULL | State machine — xem §5.2 |
+| `email_verified_at` | NULL | NULL = chưa xác minh email |
+| `version` | NOT NULL | Optimistic locking counter |
 
 ---
 
-### 2.2 Bảng `user_credentials`
+### 3.2 Bảng `user_credentials`
 
-**Migration:** `000003_create_user_credentials_table.up.sql`
+Password được tách ra bảng riêng vì lý do bảo mật: khi query user bình thường, không bao giờ join bảng này.
 
 ```sql
 CREATE TABLE IF NOT EXISTS user_credentials (
@@ -155,25 +183,20 @@ CREATE TABLE IF NOT EXISTS user_credentials (
   password_hash        TEXT        NOT NULL,
   password_algo        VARCHAR(30) NOT NULL DEFAULT 'argon2id',
   password_changed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  failed_login_count   INT         NOT NULL DEFAULT 0 CHECK (failed_login_count >= 0),
+  failed_login_count   INT         NOT NULL DEFAULT 0,
   last_failed_login_at TIMESTAMPTZ
 );
 ```
 
-| Column                 | Type        | Nullable | Default    | Ghi chú                               |
-| ---------------------- | ----------- | -------- | ---------- | ------------------------------------- |
-| `user_id`              | BIGINT      | NOT NULL | —          | PK + FK → users(id) ON DELETE CASCADE |
-| `password_hash`        | TEXT        | NOT NULL | —          | bcrypt/argon2id hash, NEVER log       |
-| `password_algo`        | VARCHAR(30) | NOT NULL | `argon2id` | Hỗ trợ mở rộng thuật toán             |
-| `password_changed_at`  | TIMESTAMPTZ | NOT NULL | NOW()      | Dùng invalidate old sessions          |
-| `failed_login_count`   | INT         | NOT NULL | 0          | Brute-force protection counter        |
-| `last_failed_login_at` | TIMESTAMPTZ | NULL     | —          |                                       |
+> **Tại sao lưu `failed_login_count`?** Phát hiện brute-force attack: sau N lần nhập sai liên tiếp, account bị khóa tạm thời.
+
+> **Tại sao chỉ lưu hash, không lưu password?** Vì nếu DB bị leak, hacker không biết password thật. bcrypt hash có tính chất **one-way**: không thể đảo ngược từ hash về password gốc.
 
 ---
 
-### 2.3 Bảng `user_devices`
+### 3.3 Bảng `user_devices`
 
-**Migration:** `000004_create_user_devices_table.up.sql`
+Theo dõi thiết bị người dùng. Mỗi thiết bị có một "dấu vân tay" (fingerprint) duy nhất.
 
 ```sql
 CREATE TABLE IF NOT EXISTS user_devices (
@@ -184,102 +207,44 @@ CREATE TABLE IF NOT EXISTS user_devices (
   first_seen_at    TIMESTAMPTZ   NOT NULL DEFAULT now(),
   last_seen_at     TIMESTAMPTZ   NOT NULL DEFAULT now(),
   revoked_at       TIMESTAMPTZ,
-  revoked_reason   VARCHAR(255),
-  metadata         JSONB         NOT NULL DEFAULT '{}'::jsonb,
-  created_at       TIMESTAMPTZ   NOT NULL DEFAULT now(),
-  updated_at       TIMESTAMPTZ   NOT NULL DEFAULT now(),
-
   UNIQUE(user_id, fingerprint_hash)
 );
 ```
 
-**Trigger:** `trg_user_devices_update_updated_at`
+> **`fingerprint_hash` là gì?** Frontend tạo một chuỗi định danh thiết bị (từ user agent, screen resolution, timezone...) rồi hash lại. Backend nhận hash này, không bao giờ biết cấu thành thực sự.
 
-| Column             | Type         | Nullable | Default | Ghi chú                     |
-| ------------------ | ------------ | -------- | ------- | --------------------------- |
-| `id`               | BIGSERIAL    | NOT NULL | auto    | PK                          |
-| `user_id`          | BIGINT       | NOT NULL | —       | FK → users(id)              |
-| `fingerprint_hash` | TEXT         | NOT NULL | —       | Hash của device fingerprint |
-| `device_label`     | VARCHAR(255) | NULL     | —       | Tên hiển thị device         |
-| `first_seen_at`    | TIMESTAMPTZ  | NOT NULL | now()   | Lần đầu xuất hiện           |
-| `last_seen_at`     | TIMESTAMPTZ  | NOT NULL | now()   | Lần cuối hoạt động          |
-| `revoked_at`       | TIMESTAMPTZ  | NULL     | —       | NULL = chưa bị thu hồi      |
-| `revoked_reason`   | VARCHAR(255) | NULL     | —       |                             |
-| `metadata`         | JSONB        | NOT NULL | `{}`    |                             |
-| `created_at`       | TIMESTAMPTZ  | NOT NULL | now()   |                             |
-| `updated_at`       | TIMESTAMPTZ  | NOT NULL | now()   | auto-trigger                |
-
-**Lưu ý:** Composite UNIQUE `(user_id, fingerprint_hash)` tự động tạo composite index — không cần index riêng cho `user_id`.  
-**Policy:** Tối đa **5 devices** active per user (`DevicePolicy.MaxDevicesPerUser = 5`).
+> **Policy:** Tối đa **5 devices** active per user. Device thứ 6 sẽ bị từ chối đăng nhập.
 
 ---
 
-### 2.4 Bảng `user_sessions`
+### 3.4 Bảng `user_sessions`
 
-**Migration:** `000005_create_user_sesions_table.up.sql`
+Mỗi session = 1 phiên đăng nhập = 1 refresh token đang tồn tại.
 
 ```sql
 CREATE TABLE IF NOT EXISTS user_sessions (
-  id BIGSERIAL PRIMARY KEY,
-  -- 1. Ràng buộc cứng: Session phải thuộc về User và Device
-  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  device_id BIGINT NOT NULL REFERENCES user_devices(id) ON DELETE CASCADE,
-
+  id                BIGSERIAL PRIMARY KEY,
+  user_id           BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  device_id         BIGINT NOT NULL REFERENCES user_devices(id) ON DELETE CASCADE,
   refresh_token_hash TEXT NOT NULL,
-  session_status VARCHAR(20) NOT NULL DEFAULT 'active' CHECK (session_status IN ('active', 'revoked', 'expired')),
-  expires_at TIMESTAMPTZ NOT NULL,
-  ip_address VARCHAR(45),
-  user_agent TEXT,
-  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  revoked_at TIMESTAMPTZ,
-  revoked_reason VARCHAR(255),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  -- 2. Chốt chặn bảo mật & Tra cứu siêu tốc độ cho API /refresh-token
-  UNIQUE(refresh_token_hash),
-  -- 3. Phục vụ Upsert: Đảm bảo 1 thiết bị của 1 user chỉ duy trì đúng 1 Session
-  UNIQUE(user_id, device_id)
+  session_status    VARCHAR(20) NOT NULL DEFAULT 'active',
+  expires_at        TIMESTAMPTZ NOT NULL,
+  ip_address        VARCHAR(45),
+  user_agent        TEXT,
+  last_seen_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  revoked_at        TIMESTAMPTZ,
+  UNIQUE(refresh_token_hash),         -- tra cứu nhanh khi refresh
+  UNIQUE(user_id, device_id)          -- 1 device = 1 session
 );
 ```
 
-**Indexes:**
+> **Tại sao `UNIQUE(user_id, device_id)`?** Đảm bảo mỗi thiết bị chỉ có đúng 1 session. Khi login lại trên cùng thiết bị → session cũ bị ghi đè (Upsert), không tạo thêm.
 
-```sql
-CREATE INDEX idx_user_sessions_id_status ON user_sessions(user_id, session_status);
-CREATE INDEX idx_user_sessions_expires_at ON user_sessions(expires_at);
-```
-
-**Trigger:** `trg_user_sessions_update_updated_at`
-
-| Column               | Type         | Nullable | Default  | Ghi chú                                 |
-| -------------------- | ------------ | -------- | -------- | --------------------------------------- |
-| `id`                 | BIGSERIAL    | NOT NULL | auto     | PK                                      |
-| `user_id`            | BIGINT       | NOT NULL | —        | FK → users(id) ON DELETE CASCADE        |
-| `device_id`          | BIGINT       | NOT NULL | —        | FK → user_devices(id) ON DELETE CASCADE |
-| `refresh_token_hash` | TEXT         | NOT NULL | —        | SHA-256 hash, UNIQUE                    |
-| `session_status`     | VARCHAR(20)  | NOT NULL | `active` | active / revoked / expired              |
-| `expires_at`         | TIMESTAMPTZ  | NOT NULL | —        | Thời điểm hết hạn session               |
-| `ip_address`         | VARCHAR(45)  | NULL     | —        | IP của client                           |
-| `user_agent`         | TEXT         | NULL     | —        | Browser/app user agent                  |
-| `last_seen_at`       | TIMESTAMPTZ  | NOT NULL | NOW()    |                                         |
-| `revoked_at`         | TIMESTAMPTZ  | NULL     | —        | NULL = chưa bị thu hồi                  |
-| `revoked_reason`     | VARCHAR(255) | NULL     | —        |                                         |
-| `created_at`         | TIMESTAMPTZ  | NOT NULL | NOW()    |                                         |
-| `updated_at`         | TIMESTAMPTZ  | NOT NULL | NOW()    | auto-trigger                            |
-
-**Lưu ý:**
-
-- UNIQUE `(refresh_token_hash)` phục vụ tra cứu nhanh.
-- UNIQUE `(user_id, device_id)` đảm bảo mỗi thiết bị chỉ có tối đa 1 session active (phục vụ Upsert logic).
-- `ON DELETE CASCADE` trên cả `user_id` và `device_id` đảm bảo session bị dọn dẹp khi user hoặc device bị xóa.
-
-**Session lifetime:** Rotate mỗi lần refresh → `expires_at += 30 ngày` (xem `Session.Rotate()`).
+> **Tại sao chỉ lưu `refresh_token_hash` thay vì token thật?** Token thật chỉ tồn tại trong RAM 1 lần duy nhất khi tạo, rồi gửi về client. DB chỉ lưu SHA-256 hash của nó. Nếu DB bị leak, hacker có hash nhưng không có token thật để dùng.
 
 ---
 
-### 2.5 Bảng `addresses`
-
-**Migration:** `000006_create_address_table.up.sql`
+### 3.5 Bảng `addresses`
 
 ```sql
 CREATE TABLE IF NOT EXISTS addresses (
@@ -290,287 +255,199 @@ CREATE TABLE IF NOT EXISTS addresses (
   province_code  VARCHAR(20)  NOT NULL,
   district_code  VARCHAR(20)  NOT NULL,
   ward_code      VARCHAR(20)  NOT NULL,
-  postal_code    VARCHAR(10),
-  country_code   VARCHAR(10)  NOT NULL DEFAULT 'VN',
   is_default     BOOLEAN      NOT NULL DEFAULT false,
-  version        BIGINT       NOT NULL DEFAULT 1 CHECK (version > 0),
-  created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  updated_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+  version        BIGINT       NOT NULL DEFAULT 1
 );
-```
 
-**Indexes:**
-
-```sql
-CREATE INDEX idx_addresses_user_id ON addresses(user_id);
--- Đảm bảo mỗi user chỉ có 1 địa chỉ mặc định
+-- Đảm bảo mỗi user chỉ có đúng 1 địa chỉ mặc định
 CREATE UNIQUE INDEX idx_addresses_unique_default ON addresses(user_id) WHERE is_default = true;
 ```
 
-**Trigger:** `trg_addresses_update_updated_at`
-
-| Column          | Type         | Nullable | Default | Ghi chú                                   |
-| --------------- | ------------ | -------- | ------- | ----------------------------------------- |
-| `id`            | BIGSERIAL    | NOT NULL | auto    | PK                                        |
-| `user_id`       | BIGINT       | NOT NULL | —       | FK → users(id)                            |
-| `address_line1` | VARCHAR(255) | NOT NULL | —       | Số nhà, tên đường                         |
-| `address_line2` | VARCHAR(255) | NULL     | —       | Tầng, phòng...                            |
-| `province_code` | VARCHAR(20)  | NOT NULL | —       | Mã tỉnh/thành                             |
-| `district_code` | VARCHAR(20)  | NOT NULL | —       | Mã quận/huyện                             |
-| `ward_code`     | VARCHAR(20)  | NOT NULL | —       | Mã phường/xã                              |
-| `postal_code`   | VARCHAR(10)  | NULL     | —       |                                           |
-| `country_code`  | VARCHAR(10)  | NOT NULL | `VN`    | ISO 3166-1 alpha-2                        |
-| `is_default`    | BOOLEAN      | NOT NULL | false   | Partial unique index → max 1 default/user |
-| `version`       | BIGINT       | NOT NULL | 1       | Optimistic locking                        |
-| `created_at`    | TIMESTAMPTZ  | NOT NULL | NOW()   |                                           |
-| `updated_at`    | TIMESTAMPTZ  | NOT NULL | NOW()   | auto-trigger                              |
+> **Partial unique index** `WHERE is_default = true` là một trick DB: chỉ enforce uniqueness trên những row có `is_default = true`. Các address khác (`is_default = false`) có thể nhiều tùy ý.
 
 ---
 
-### 2.6 ERD tóm tắt
+### 3.6 ERD tóm tắt
 
 ```
-users (1) ──────────────────────────── (1) user_credentials
+users (1) ──── (1) user_credentials
   │
   ├── (1) ──── (N) user_devices
-  │                  │
-  ├── (1) ──── (N) user_sessions ──── (0..1) user_devices
+  │                     │
+  └── (1) ──── (N) user_sessions ── (1) user_devices
   │
   └── (1) ──── (N) addresses
 ```
 
 ---
 
-## 3. Domain Model
+## 4. Domain Model — Thực thể nghiệp vụ
 
-### 3.1 Entity `User`
+Domain entity **không phải là DB row**. Chúng là đối tượng chứa business logic. Ví dụ: `User` không chỉ có data, nó còn có hành vi như `MarkEmailVerified()`, `CanLogin()`.
+
+### 4.1 Entity `User`
 
 ```go
 type User struct {
     ID              int64
-    Email           valueobject.Email          // validated, normalized lowercase
+    Email           valueobject.Email          // có validation
     FullName        string
-    Phone           *string                    // optional
+    Phone           *string                    // con trỏ vì có thể null
     UserType        string                     // "customer" | "admin" | "operator"
     Status          valueobject.UserStatus     // state machine
     EmailVerifiedAt *time.Time                 // nil = chưa verify
     LastLoginAt     *time.Time
     LockedReason    *string
-    Metadata        map[string]interface{}     // JSONB, extensible
+    Metadata        map[string]interface{}
     Version         int64                      // optimistic lock
     CreatedAt       time.Time
     UpdatedAt       time.Time
 }
 ```
 
-**Domain methods:**
+**Các method của User:**
 
-| Method                                   | Mô tả                                                        |
-| ---------------------------------------- | ------------------------------------------------------------ |
-| `IsEmailVerified() bool`                 | Email đã được xác minh?                                      |
-| `CanPerformDigitalActions() error`       | Gate check — yêu cầu email đã verify                         |
-| `MarkEmailVerified(now time.Time) error` | Idempotent — set `EmailVerifiedAt`, chuyển status → `active` |
-| `Suspend() error`                        | Chuyển sang `suspended` nếu state machine cho phép           |
-| `Ban() error`                            | Chuyển sang `banned` — terminal state                        |
+| Method | Ý nghĩa |
+|---|---|
+| `IsEmailVerified() bool` | Kiểm tra email đã xác minh chưa |
+| `CanPerformDigitalActions() error` | Cổng bảo vệ — yêu cầu email đã verify mới được làm những thứ quan trọng |
+| `MarkEmailVerified(now) error` | Set EmailVerifiedAt, tự động chuyển status → active (idempotent) |
 
 ---
 
-### 3.2 Entity `Credential`
+### 4.2 Entity `Credential` — Thực thể mật khẩu (tách biệt hoàn toàn)
 
 ```go
 type Credential struct {
     UserID            int64
-    PasswordHash      string     // bcrypt/argon2id — NEVER log
-    PasswordAlgo      string
+    PasswordHash      string     // NEVER log, NEVER trả ra ngoài
+    PasswordAlgo      string     // "bcrypt" hoặc "argon2id"
     PasswordChangedAt time.Time
     FailedLoginCount  int
     LastFailedLoginAt *time.Time
 }
 ```
 
-> **Security rule:** Sau khi verify, caller nhận `bool` hoặc `error` — KHÔNG bao giờ trả `Credential` ra ngoài domain.
-
-**Domain methods:**
-
-| Method                                           | Mô tả                                 |
-| ------------------------------------------------ | ------------------------------------- |
-| `IsPasswordChangeRequired(now, maxAgeDays) bool` | Kiểm tra password quá hạn theo policy |
-| `MarkPasswordChanged(newHash, algo, now)`        | Cập nhật hash + timestamp             |
+> **Nguyên tắc bảo mật:** Sau khi verify password xong, caller chỉ nhận `true/false` hoặc `error`. `Credential` object không bao giờ được trả ra khỏi domain layer.
 
 ---
 
-### 3.3 Entity `Device`
-
-```go
-type Device struct {
-    ID            int64
-    UserID        int64
-    Fingerprint   string             // mapped từ fingerprint_hash
-    Label         string             // mapped từ device_label
-    FirstSeenAt   time.Time
-    LastSeenAt    time.Time
-    RevokedAt     *time.Time
-    RevokedReason string
-    Metadata      map[string]interface{}
-    CreatedAt     time.Time
-    UpdatedAt     time.Time
-}
-```
-
-**Domain methods:**
-
-| Method                          | Mô tả                                      |
-| ------------------------------- | ------------------------------------------ |
-| `IsRevoked() bool`              | Device đã bị thu hồi?                      |
-| `Revoke(now) error`             | Idempotent revoke                          |
-| `AssertOwnership(userID) error` | Enforce ownership — gọi trước mọi mutation |
-| `UpdateLastSeen(now)`           | Cập nhật `last_seen_at`                    |
-
----
-
-### 3.4 Entity `Session`
+### 4.3 Entity `Session`
 
 ```go
 type Session struct {
     ID               int64
     UserID           int64
-    RefreshTokenHash string     // SHA-256(raw_refresh_token)
-    DeviceID         *int64     // nil nếu device chưa đăng ký
-    SessionStatus    string     // "active" | "revoked" | "expired"
+    RefreshTokenHash string        // SHA-256(raw_refresh_token)
+    DeviceID         *int64
+    SessionStatus    string        // "active" | "revoked" | "expired"
     ExpiredAt        time.Time
     IPAddress        string
     UserAgent        string
     LastSeenAt       time.Time
     RevokedAt        *time.Time
-    RevokedReason    *string
-    CreatedAt        time.Time
-    UpdatedAt        time.Time
 }
 ```
 
-**Domain methods:**
+**Các method của Session:**
 
-| Method                          | Mô tả                                        |
-| ------------------------------- | -------------------------------------------- |
-| `IsRevoked() bool`              | Session bị revoke chưa?                      |
-| `IsExpired(now time.Time) bool` | So sánh với `now` được inject vào — testable |
-| `Revoke(now)`                   | Idempotent revoke                            |
-| `Rotate(newHash, now)`          | Cập nhật hash + gia hạn 30 ngày              |
+| Method | Ý nghĩa |
+|---|---|
+| `IsRevoked() bool` | Session bị thu hồi chưa? |
+| `IsExpired(now) bool` | Đã quá hạn chưa? (inject `now` để có thể test) |
+| `Revoke(now)` | Thu hồi session (idempotent) |
+| `Rotate(newHash, now)` | Cập nhật token hash + gia hạn thêm 30 ngày |
 
 ---
 
-### 3.5 Entity `Address`
+### 4.4 Entity `Device`
 
 ```go
-type Address struct {
-    ID          int64
-    UserID      int64
-    Line1       string   // address_line1
-    Line2       string   // address_line2
-    Province    string   // province_code
-    District    string   // district_code
-    Ward        string   // ward_code
-    PostalCode  string
-    CountryCode string
-    IsDefault   bool
-    Version     int64    // optimistic lock
-    CreatedAt   time.Time
-    UpdatedAt   time.Time
+type Device struct {
+    ID            int64
+    UserID        int64
+    Fingerprint   string
+    Label         string
+    FirstSeenAt   time.Time
+    LastSeenAt    time.Time
+    RevokedAt     *time.Time
 }
 ```
 
-**Domain methods:**
-
-| Method                          | Mô tả                                     |
-| ------------------------------- | ----------------------------------------- |
-| `AssertOwnership(userID) error` | Enforce ownership boundary trước mutation |
-
 ---
 
-## 4. Value Objects & Enums
+## 5. Value Objects & Enums
 
-### 4.1 `Email`
+### 5.1 `Email` — Kiểu dữ liệu có validation tích hợp
 
 ```go
 type Email struct { value string }
 ```
 
 - Validated bằng `net/mail.ParseAddress`
-- Normalized: `strings.ToLower(strings.TrimSpace(raw))`
-- Max length: 255 ký tự
-- Factory: `NewEmail(raw string) (Email, error)`
+- Tự động lowercase + trim whitespace
+- Max 255 ký tự
+- Tạo bằng: `NewEmail(raw string) (Email, error)`
 
-### 4.2 `UserStatus` — State Machine
-
-```
-pending_verification ──→ active ──→ suspended ──→ active
-                           │                │
-                           └───────── banned (terminal)
-                                     suspended ──→ banned
-```
-
-| DB Value               | Hằng số Go                      | Mô tả                                   |
-| ---------------------- | ------------------------------- | --------------------------------------- |
-| `pending_verification` | `UserStatusPendingVerification` | Mặc định khi đăng ký, chưa verify email |
-| `active`               | `UserStatusActive`              | Đã verify, hoạt động bình thường        |
-| `disabled`             | `UserStatusSuspended`           | Bị khoá tạm thời                        |
-| `locked`               | `UserStatusBanned`              | Cấm vĩnh viễn — KHÔNG thể hoàn tác      |
-
-**CanLogin rules:**
-
-- `active` → ✅ có thể login
-- `pending_verification` → ✅ có thể login (nhưng bị hạn chế digital actions)
-- `disabled` / `locked` → ❌ không thể login
-
-> ✅ **Đã đồng bộ (v1.1):** Go constants đã được cập nhật để match DB CHECK constraint.
+> **Tại sao dùng Value Object thay vì `string`?** Vì `string` không tự kiểm tra. Nếu truyền `string` thì có thể vô tình truyền email chưa validate. Dùng `Email` type → compiler đảm bảo bạn không thể tạo `Email` bất hợp lệ.
 
 ---
 
-## 5. Domain Policies
+### 5.2 `UserStatus` — State Machine (Máy trạng thái)
 
-### 5.1 `RegisterPolicy`
+Đây là khái niệm quan trọng: account status không phải muốn đổi thành gì thì đổi. Có những chuyển trạng thái hợp lệ và không hợp lệ.
 
-| Setting         | Giá trị |
-| --------------- | ------- |
-| `MinPassLength` | 8       |
-| `MaxPassLength` | 72      |
-
-**`ValidatePassword(password) error`**
-
-- Kiểm tra độ dài: `[8, 72]`
-- Bắt buộc có: ít nhất 1 chữ HOA, 1 chữ thường, 1 chữ số
-
-**`ValidateRegistration(email, password) error`**
-
-- Email không được rỗng
-- Gọi `ValidatePassword`
-
----
-
-### 5.2 `DevicePolicy`
-
-| Setting             | Giá trị   |
-| ------------------- | --------- |
-| `MaxDevicesPerUser` | 5         |
-| `MaxSessionTTL`     | 30 (ngày) |
-
-**`CanRegisterNewDevice(activeDevices) error`**
-
-- Trả `ErrDeviceLimitReached` nếu số device active ≥ 5
-
-**`MaxSessionTTL` usage:**
-
-```go
-ExpiredAt: now.Add(time.Duration(s.devicePolicy.MaxSessionTTL) * 24 * time.Hour)
+```
+pending_verification ──→ active ──→ disabled (tạm khóa)
+                           │              │
+                           └──────────────┴──→ locked (cấm vĩnh viễn)
 ```
 
+| DB Value | Hằng số Go | Ý nghĩa |
+|---|---|---|
+| `pending_verification` | `UserStatusPendingVerification` | Mới đăng ký, chưa xác minh email |
+| `active` | `UserStatusActive` | Hoạt động bình thường |
+| `disabled` | `UserStatusSuspended` | Bị khoá tạm thời |
+| `locked` | `UserStatusBanned` | Cấm vĩnh viễn — KHÔNG thể hoàn tác |
+
+**Quy tắc CanLogin:**
+- `active` → ✅ đăng nhập được
+- `pending_verification` → ✅ đăng nhập được (nhưng bị hạn chế tính năng)
+- `disabled` / `locked` → ❌ bị từ chối
+
 ---
 
-## 6. Repository Interfaces
+## 6. Domain Policies — Luật nghiệp vụ cứng
 
-Tất cả interfaces được định nghĩa trong `domain/repository.go`. Implementations ở `infra/postgres/`.
+Policy là nơi chứa các **giới hạn nghiệp vụ** có thể cấu hình được. Khác với entity method (chỉ áp dụng cho 1 object), policy áp dụng ở cấp hệ thống.
 
-### 6.1 `UserRepository`
+### 6.1 `RegisterPolicy`
+
+| Tham số | Giá trị | Ý nghĩa |
+|---|---|---|
+| `MinPassLength` | 8 | Password tối thiểu 8 ký tự |
+| `MaxPassLength` | 72 | Giới hạn của bcrypt |
+
+**Quy tắc validate password:**
+- Độ dài: `[8, 72]`
+- Phải có: ít nhất 1 chữ HOA, 1 chữ thường, 1 chữ số
+
+### 6.2 `DevicePolicy`
+
+| Tham số | Giá trị | Ý nghĩa |
+|---|---|---|
+| `MaxDevicesPerUser` | 5 | Tối đa 5 thiết bị active |
+| `MaxSessionTTL` | 30 (ngày) | Refresh token tồn tại 30 ngày |
+
+---
+
+## 7. Repository Interfaces — Hợp đồng với Database
+
+> **Hiểu nôm na:** Interface là "tờ hợp đồng" liệt kê những gì DB phải làm. `AuthService` chỉ biết hợp đồng này, không biết bên dưới dùng PostgreSQL hay MongoDB hay thứ gì khác.
+
+Tất cả interfaces định nghĩa tại `domain/repository.go`. Implementation thực tế tại `infra/postgres/`.
+
+### 7.1 `UserRepository`
 
 ```go
 type UserRepository interface {
@@ -583,20 +460,9 @@ type UserRepository interface {
 }
 ```
 
-**SQL queries key:**
-
-| Method              | Query pattern                                                  |
-| ------------------- | -------------------------------------------------------------- |
-| `GetByID`           | `SELECT ... FROM users WHERE id = $1`                          |
-| `GetByEmail`        | `SELECT ... FROM users WHERE email = $1`                       |
-| `ExistsByEmail`     | `SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)`          |
-| `Insert`            | `INSERT INTO users (...) VALUES (...) RETURNING id`            |
-| `UpdateStatus`      | `UPDATE users SET account_status = $1 WHERE id = $2`           |
-| `MarkEmailVerified` | Idempotent COALESCE update + tự động active nếu lần đầu verify |
-
 ---
 
-### 6.2 `CredentialRepository`
+### 7.2 `CredentialRepository`
 
 ```go
 type CredentialRepository interface {
@@ -608,30 +474,34 @@ type CredentialRepository interface {
 
 ---
 
-### 6.3 `SessionRepository`
+### 7.3 `SessionRepository`
 
 ```go
 type SessionRepository interface {
-    Update(ctx, session *entity.Session) error                                  // ✅ thêm mới v1.1
-    Insert(ctx, session *entity.Session) error
+    Upsert(ctx, session *entity.Session) error
+    Update(ctx, session *entity.Session) error
     GetByRefreshTokenHash(ctx, hash string) (*entity.Session, error)
-    GetByRefreshTokenHashForUpdate(ctx, hash string) (*entity.Session, error)  // SELECT FOR UPDATE
+    GetByRefreshTokenHashForUpdate(ctx, hash string) (*entity.Session, error)
+    GetByDeviceID(ctx, deviceID int64) (*entity.Session, error)
     ListActiveByUserID(ctx, userID int64) ([]*entity.Session, error)
     Revoke(ctx, id int64, revokedAt time.Time) error
     RevokeAllByUserID(ctx, userID int64, revokedAt time.Time) error
+    RevokeAllExcept(ctx, userID int64, excludeSessionID int64, revokedAt time.Time) error
 }
 ```
 
-**Lưu ý:**
+**Giải thích các method quan trọng:**
 
-- `Update`: cập nhật `refresh_token_hash`, `expires_at`, `last_seen_at` sau khi rotate session
-- `ListActiveByUserID`: lọc `revoked_at IS NULL AND expires_at > NOW()`
-- `GetByRefreshTokenHashForUpdate`: thêm `FOR UPDATE` — dùng trong Rotate flow trong transaction
-- `Revoke` dùng `COALESCE(revoked_at, $2)` — idempotent
+| Method | Tại sao cần |
+|---|---|
+| `Upsert` | Login lại trên cùng device → ghi đè session cũ thay vì tạo thêm |
+| `GetByRefreshTokenHashForUpdate` | Thêm `FOR UPDATE` vào SQL — khóa row để chống 2 request refresh cùng lúc |
+| `RevokeAllExcept` | Khi đổi password → revoke tất cả session NGOẠI TRỪ session hiện tại |
+| `GetByDeviceID` | Tìm session theo device để dọn Redis cache |
 
 ---
 
-### 6.4 `DeviceRepository`
+### 7.4 `DeviceRepository`
 
 ```go
 type DeviceRepository interface {
@@ -643,336 +513,108 @@ type DeviceRepository interface {
 }
 ```
 
-**Upsert device query:**
-
+**Upsert device SQL:**
 ```sql
-INSERT INTO user_devices (user_id, fingerprint_hash, device_label, first_seen_at, last_seen_at, revoked_at)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO user_devices (user_id, fingerprint_hash, device_label, ...)
+VALUES ($1, $2, $3, ...)
 ON CONFLICT (user_id, fingerprint_hash) DO UPDATE SET
     device_label = EXCLUDED.device_label,
     last_seen_at = EXCLUDED.last_seen_at,
-    revoked_at   = NULL              -- re-activate nếu trước đó đã revoke
+    revoked_at   = NULL    -- re-activate nếu trước đó đã revoke
 RETURNING id, first_seen_at
 ```
 
 ---
 
-### 6.5 `AddressRepository`
+## 8. Port Interfaces — Hợp đồng với Hạ tầng ngoài
+
+Ports là interface cho các dependency bên ngoài DB: Redis, JWT, Email service...
+
+### 8.1 `PasswordHasher`
 
 ```go
-type AddressRepository interface {
-    GetByID(ctx, id int64) (*entity.Address, error)
-    ListByUserID(ctx, userID int64) ([]*entity.Address, error)
-    Insert(ctx, address *entity.Address) error
-    Update(ctx, address *entity.Address) error
-    Delete(ctx, id int64) error
-    UnsetDefaultByUserID(ctx, userID int64) error
+type PasswordHasher interface {
+    Hash(ctx, raw string) (string, error)
+    Verify(ctx, raw, hash string) error
 }
 ```
 
-**Lưu ý:** `UnsetDefaultByUserID` được gọi trước khi set một address mới làm default, đảm bảo invariant "chỉ 1 default/user".
+**Implementation:** `platform/auth.BcryptHasher` (cost=12 từ config)
 
 ---
 
-## 7. Query Layer (CQRS Read-side)
-
-### 7.1 Interface
+### 8.2 `TokenManager`
 
 ```go
-type QueryRepository interface {
-    GetMe(ctx, userID int64) (*MeView, error)
-    ListSessions(ctx, userID int64) ([]*SessionView, error)
-    ListDevices(ctx, userID int64) ([]*DeviceView, error)
-    ListAddresses(ctx, userID int64) ([]*AddressView, error)
+type TokenManager interface {
+    GenerateAccessToken(ctx, claims AccessTokenClaims) (token string, expiresAt time.Time, error)
+    GenerateRefreshToken(ctx, userID int64) (string, error)
+}
+
+type AccessTokenClaims struct {
+    UserID    int64
+    Email     string
+    Role      string
+    Type      string
+    SessionID int64
+    DeviceID  int64
+    JTI       string  // JWT ID — dùng cho blacklist
 }
 ```
 
-### 7.2 View Models
+| Token | Kiểu | TTL | Ghi chú |
+|---|---|---|---|
+| Access token | JWT (HS256) | 15 phút | Chứa claims: user_id, email, role, jti |
+| Refresh token | Opaque random hex 32 bytes | 30 ngày | KHÔNG phải JWT — chỉ là chuỗi ngẫu nhiên |
 
-#### `MeView`
+> **Tại sao refresh token không phải JWT?** JWT có thể bị decode để đọc payload. Refresh token là chuỗi ngẫu nhiên hoàn toàn, không chứa thông tin gì → không leak thông tin dù bị intercepted.
+
+---
+
+### 8.3 `RedisSessionService`
 
 ```go
-type MeView struct {
-    UserID          int64
-    Email           string
-    FullName        string
-    Status          string
-    EmailVerifiedAt *time.Time
-    CreatedAt       time.Time
+type RedisSessionService interface {
+    IssueVerifyToken(ctx, userID int64) (token string, error)
+    ParseVerifyToken(ctx, token string) (userID int64, error)  // atomic GetDel
+    SetUserSession(ctx, sessionID int64, data SessionData, ttl int64) error
+    GetUserSession(ctx, sessionID int64) (*SessionData, error)
+    DeleteSession(ctx, sessionID int64) error
+    DeleteMultipleSessions(ctx, sessionIDs []int64) error
 }
 ```
 
-#### `SessionView`
+**Redis key patterns:**
+
+| Mục đích | Key format | TTL |
+|---|---|---|
+| Email verification token | `identity:email_verify:{token}` | 24 giờ |
+| Session cache | `identity:session:{sessionID}` | Bằng session TTL |
+
+> **`ParseVerifyToken` dùng atomic `GetDel`**: Lấy giá trị và xóa key trong 1 thao tác atomic. Đảm bảo token chỉ dùng được đúng 1 lần — không thể verify email 2 lần với cùng 1 link.
+
+---
+
+### 8.4 `BlacklistPort`
 
 ```go
-type SessionView struct {
-    ID        int64
-    DeviceID  *int64
-    IPAddress string
-    UserAgent string
-    ExpiredAt time.Time
-    RevokedAt *time.Time
-    CreatedAt time.Time
+type BlacklistPort interface {
+    AddToBlacklist(ctx, jti string, expiration time.Duration) error
+    IsTokenBlacklisted(ctx, jti string) (bool, error)
 }
 ```
 
-#### `DeviceView`
+**Implementation:** Redis với key `blacklist:access_token:{jti}`, TTL = thời gian còn lại của token.
 
-```go
-type DeviceView struct {
-    ID          int64
-    Fingerprint string
-    Label       string
-    FirstSeenAt time.Time
-    LastSeenAt  time.Time
-    RevokedAt   *time.Time
-}
-```
-
-#### `AddressView`
-
-```go
-type AddressView struct {
-    ID        int64
-    Province  string
-    District  string
-    Ward      string
-    Line1     string
-    Line2     string
-    IsDefault bool
-}
-```
-
-> ✅ **Đã fix (v1.1):** Đã xóa field `Phone` không tồn tại trong bảng `addresses`.
+> **Tại sao cần blacklist?** JWT access token tự xác thực (stateless) — server không lưu gì. Nếu user đổi password, access token cũ vẫn hợp lệ trong 15 phút. Blacklist giải quyết vấn đề này: thêm `jti` (JWT unique ID) vào Redis → token bị từ chối ngay lập tức.
 
 ---
 
-## 8. Application Services (Use Cases)
-
-> **Trạng thái (v1.1):** Đã implement đầy đủ `AuthService`, `ProfileService`, `AddressService` trong `app/service/`. DTOs, Commands, và Port interfaces đã sẵn sàng.
-
-### 8.1 Auth Use Cases
-
-#### UC-01: Register (Đăng ký tài khoản)
-
-**Input:**
-
-- `email: string`
-- `password: string`
-- `full_name: string`
-- `phone?: string`
-- `Idempotency-Key: string` (HTTP Header)
-
-**Flow:**
-
-1. **Idempotency Check**: Middleware kiểm tra `Idempotency-Key` trong Redis. Nếu đã có kết quả cache, trả về ngay lập tức.
-2. `RegisterPolicy.ValidateRegistration(email, password)` — validate input
-3. `UserRepository.ExistsByEmail(email)` — check trùng email
-4. `PasswordHasher.Hash(ctx, password)` — hash bằng bcrypt
-5. Tạo `User` entity với `Status = pending_verification` và `Version = 1`
-6. `tx.TxManager.WithinTransaction`:
-   - `UserRepository.Insert(user)`
-   - `CredentialRepository.Insert(credential)`
-   - `VerificationTokenService.IssueEmailVerificationToken(userID)` — tạo token Redis
-   - `EventPublisher.PublishUserRegistered(payload)` — Ghi vào bảng `outbox_events` (Atomic)
-
-**Output:** `dto.RegisterOutput{UserID, Email, Message}` + Header `X-Idempotency-Replayed` (nếu có)
-
----
-
-#### UC-02: Login (Đăng nhập)
-
-**Input:**
-
-- `email: string`
-- `password: string`
-- `device_fingerprint?: string`
-- `device_label?: string`
-- `ip_address: string`
-- `user_agent: string`
-
-**Flow:**
-
-1. `UserRepository.GetByEmail(email)`
-2. Kiểm tra `UserStatus.CanLogin()`
-3. `CredentialRepository.GetByUserID(userID)`
-4. `PasswordHasher.Verify(ctx, password, hash)` — bcrypt compare
-5. Nếu có `device_fingerprint`:
-   - `DeviceRepository.ListActiveByUserID` + `DevicePolicy.CanRegisterNewDevice`
-   - `DeviceRepository.GetByFingerprint` → `DeviceRepository.Upsert`
-6. `TokenManager.GenerateAccessToken(claims)` → `(token, expiresAt)`
-7. `TokenManager.GenerateRefreshToken(userID)` → raw random hex 32 bytes
-8. Hash refresh token: `sha256(rawToken)`
-9. `SessionRepository.Insert(session)` với `refresh_token_hash`, TTL từ `DevicePolicy.MaxSessionTTL`
-10. Trả token raw về HTTP layer (ONE-TIME)
-
-**Output:** `dto.LoginOutput{AccessToken, RefreshToken, ExpiresAt}`
-
----
-
-#### UC-03: Refresh Token
-
-**Input:**
-
-- `refresh_token: string` (raw)
-
-**Flow:**
-
-1. `hashToken(rawRefreshToken)` → SHA-256 hex
-2. `tx.TxManager.WithinTransaction`:
-   - `SessionRepository.GetByRefreshTokenHashForUpdate(hash)` — `SELECT FOR UPDATE` chống race condition
-   - Kiểm tra `session.IsRevoked()` và `session.IsExpired(now)`
-   - `TokenManager.GenerateRefreshToken(userID)` → new raw token
-   - `session.Rotate(hashToken(newRaw), now)` → gia hạn session 30 ngày
-   - `SessionRepository.Update(session)` — ghi hash mới vào DB
-   - `TokenManager.GenerateAccessToken(claims)` → new access token
-3. Trả về `dto.RefreshTokenOutput{AccessToken, RefreshToken, ExpiresAt}`
-
----
-
-#### UC-04: Logout (Thu hồi session)
-
-**Input:** `session_id: int64` (từ JWT claims hoặc query param)
-
-**Flow:**
-
-1. `SessionRepository.Revoke(id, now)`
-2. Optionally: `DeviceRepository.Revoke(device_id, now)` nếu user muốn đăng xuất khỏi device
-
----
-
-#### UC-05: Verify Email
-
-**Input:** `token: string` (email verification token)
-
-**Flow:**
-
-1. Validate và decode token (Redis/JWT)
-2. Extract `user_id` từ token
-3. `UserRepository.MarkEmailVerified(user_id, now)` — idempotent
-
----
-
-### 8.2 Profile Use Cases
-
-#### UC-06: Get Me
-
-**Input:** `user_id` (từ JWT)
-
-**Flow:** `QueryRepository.GetMe(user_id)` → `MeView`
-
----
-
-## 9. Port Adapters
-
-Sau khi tái cấu trúc (v1.2), các implementation được phân chia theo nguyên tắc:
-
-- **`platform/auth/`**: logic không gắn domain bất kỳ (crypto, JWT, Redis token)
-- **`identity/infra/adapters/`**: adapters identity-specific + thin bridge wrappers
-
-### 9.1 `platform/auth.BcryptHasher` → `ports.PasswordHasher`
-
-```go
-// platform/auth/bcrypt_hasher.go
-type BcryptHasher struct{ cost int }
-func NewBcryptHasher(cost int) *BcryptHasher
-func (h *BcryptHasher) Hash(ctx context.Context, raw string) (string, error)
-func (h *BcryptHasher) Verify(ctx context.Context, raw, hash string) error
-```
-
-| Chi tiết          | Giá trị                                                                      |
-| ----------------- | ---------------------------------------------------------------------------- |
-| Thuật toán        | bcrypt                                                                       |
-| Cost              | Lấy từ `config.JWT.BcryptCost` (mặc định: 12)                                |
-| Structural typing | `*BcryptHasher` satisfy `ports.PasswordHasher` trực tiếp — không cần adapter |
-
----
-
-### 9.2 `platform/auth.JWTTokenManager` → `ports.TokenManager`
-
-```go
-// platform/auth/jwt_token_manager.go
-type JWTClaims struct {
-    UserID int64; Email string; Role string; Type string
-}
-type JWTTokenManager struct{ cfg config.JWTConfig }
-func NewJWTTokenManager(cfg config.JWTConfig) *JWTTokenManager
-func (m *JWTTokenManager) GenerateAccessToken(ctx, claims JWTClaims) (string, time.Time, error)
-func (m *JWTTokenManager) GenerateRefreshToken(ctx, userID int64) (string, error)
-```
-
-| Chi tiết      | Giá trị                                                                                                     |
-| ------------- | ----------------------------------------------------------------------------------------------------------- |
-| Access token  | HS256 JWT, claim: `user_id`, `email`, `role`, `type="access"`                                               |
-| Access TTL    | `config.JWT.AccessTokenTTL` (mặc định: 15 phút)                                                             |
-| Refresh token | **Opaque** random hex 32 bytes (không phải JWT)                                                             |
-| Bridge layer  | `jwtTokenManagerBridge` trong `adapters/provider.go` — convert `ports.AccessTokenClaims` → `auth.JWTClaims` |
-
-> **Tại sao cần bridge?** `platform/auth` không được import `identity/app/ports` (vi phạm layering). `JWTClaims` và `ports.AccessTokenClaims` có cùng fields, `jwtTokenManagerBridge` trong adapters chuyển đổi giữa hai kiểu.
-
-```go
-// identity/infra/adapters/provider.go
-type jwtTokenManagerBridge struct{ inner *auth.JWTTokenManager }
-func (b *jwtTokenManagerBridge) GenerateAccessToken(ctx, c ports.AccessTokenClaims) (string, time.Time, error) {
-    return b.inner.GenerateAccessToken(ctx, auth.JWTClaims{
-        UserID: c.UserID, Email: c.Email, Role: c.Role, Type: c.Type,
-    })
-}
-```
-
----
-
-### 9.3 `platform/auth.RedisVerificationTokenService` → `ports.VerificationTokenService`
-
-```go
-// platform/auth/redis_verify_token.go
-type RedisVerificationTokenService struct{ rdb *goredis.Client }
-func NewRedisVerificationTokenService(rdb *goredis.Client) *RedisVerificationTokenService
-func (s *RedisVerificationTokenService) IssueEmailVerificationToken(ctx, userID int64) (string, error)
-func (s *RedisVerificationTokenService) ParseEmailVerificationToken(ctx, token string) (int64, error)
-```
-
-| Chi tiết          | Giá trị                                                                             |
-| ----------------- | ----------------------------------------------------------------------------------- |
-| Token             | Random hex 32 bytes (dùng `generateSecureToken()` từ `platform/auth/rand.go`)       |
-| Storage           | Redis key: `identity:email_verify:{token}`                                          |
-| TTL               | 24 giờ                                                                              |
-| Single-use        | `GetDel` — lấy và xóa trong cùng 1 thác tác → chống replay attack                   |
-| Structural typing | `*RedisVerificationTokenService` satisfy `ports.VerificationTokenService` trực tiếp |
-
----
-
-### 9.4 `OutboxEventPublisher` → `ports.EventPublisher` _(identity-specific)_
-
-```go
-// identity/infra/adapters/outbox_event_publisher.go
-type OutboxEventPublisher struct {
-    recorder *outbox.OutboxRecorder
-    log      *zap.Logger
-}
-```
-
-- **Cơ chế**: Thay vì publish trực tiếp lên Kafka, adapter này sử dụng `OutboxRecorder` để ghi sự kiện vào bảng `outbox_events` trong cùng transaction nghiệp vụ.
-- **Tính nhất quán**: Đảm bảo sự kiện luôn được ghi lại nếu nghiệp vụ thành công (Atomicity).
-- **Phục hồi**: `OutboxDispatcher` (Background Worker) sẽ quét bảng này để publish lên Kafka topic `notification.commands.v1`.
-
----
-
-### 9.5 `RealClock` → `ports.Clock` _(identity-specific)_
-
-```go
-func (c *RealClock) Now() time.Time { return time.Now() }
-```
-
-- Test: inject `MockClock` với giá trị cố định — không cần mock time package toàn cục
-
----
-
-### 9.4 `LogEventPublisher` → `ports.EventPublisher`
+### 8.5 `EventPublisher`
 
 ```go
 type EventPublisher interface {
-    PublishUserRegistered(ctx context.Context, payload UserRegisteredPayload) error
+    PublishUserRegistered(ctx, payload UserRegisteredPayload) error
 }
 
 type UserRegisteredPayload struct {
@@ -982,245 +624,674 @@ type UserRegisteredPayload struct {
 }
 ```
 
-> **Phase 1:** Chỉ log sự kiện bằng `zap.Logger`. Không gửi email thật.
-> **Phase 2:** Swap sang `KafkaEventPublisher` hoặc `SMTPPublisher` mà không đụng vào `AuthService`.
+**Cơ chế Transactional Outbox:** Thay vì gửi email trực tiếp (có thể fail sau khi commit DB), event được ghi vào bảng `outbox_events` trong cùng transaction với việc tạo user. Background worker sau đó đọc và xử lý event này.
 
 ---
 
-### 9.5 `RealClock` → `ports.Clock`
+## 9. Application Services — Các Use Case nghiệp vụ
 
-```go
-type Clock interface {
-    Now() time.Time
-}
+`AuthService` là "nhạc trưởng" — nó điều phối các repository và port để thực hiện các use case. Nó KHÔNG biết gì về HTTP, JSON, hay cookie.
+
+### UC-01: Register — Đăng ký tài khoản
+
+**Input:** `RegisterCommand{Email, Password, FullName, Phone}`
+
+```
+1. Validate: RegisterPolicy.ValidateRegistration(email, password)
+2. Check trùng email: UserRepository.ExistsByEmail(email)
+3. Hash password: PasswordHasher.Hash(password) → hash string
+4. Tạo User entity với Status = pending_verification, Version = 1
+5. [BEGIN TRANSACTION]
+   a. UserRepository.Insert(user) → userID
+   b. CredentialRepository.Insert(credential)
+   c. RedisSessionService.IssueVerifyToken(userID) → verifyToken
+   d. EventPublisher.PublishUserRegistered({userID, email, verifyToken})
+      (ghi vào bảng outbox_events — atomic với transaction)
+6. [COMMIT]
+7. Return: RegisterOutput{UserID, Email}
 ```
 
-- Production: `RealClock.Now()` = `time.Now()`
-- Test: inject `MockClock` với giá trị cố định — không cần mock time package toàn cục
+> **Idempotency-Key:** Middleware kiểm tra header `Idempotency-Key` trong Redis. Nếu đã tồn tại → trả lại kết quả cũ, không thực thi lại. Chống double-click tạo 2 account.
 
 ---
 
-## 10. Dependency Injection & Wire
+### UC-02: Login — Đăng nhập
 
-### 10.1 `tx.TxManager` interface
-
-Thêm interface `TxManager` vào `platform/tx/manager.go`:
-
-```go
-type TxManager interface {
-    WithinTransaction(ctx context.Context, fn func(ctx context.Context) error) error
-}
-```
-
-`*tx.Manager` implicitly implements `TxManager` — wire bind qua `ProvideTxManagerInterface`.
-
-### 10.2 Layering Rule: Platform ≠ Module
-
-`platform/auth` không được import `identity/app/ports`.
-Layer flow: `bootstrap` → `platform/auth` + `identity/infra/adapters` → `identity/app/ports` (interface).
+**Input:** `LoginCommand{Email, Password, DeviceFingerprint, DeviceLabel, IPAddress, UserAgent}`
 
 ```
-[platform/auth]         [identity/infra/adapters]
-  BcryptHasher    ───│──► (direct) → ports.PasswordHasher
-  JWTTokenManager ───│──► jwtTokenManagerBridge → ports.TokenManager
-  RedisVerifyTokenSvc ─│──► (direct) → ports.VerificationTokenService
-                       │
-  [adapters-only]      │
-  LogEventPublisher ──► ports.EventPublisher
-  RealClock ────────► ports.Clock
+1. UserRepository.GetByEmail(email)
+2. Kiểm tra user.Status.CanLogin() → lỗi nếu account disabled/locked
+3. CredentialRepository.GetByUserID(userID)
+4. PasswordHasher.Verify(password, credential.PasswordHash)
+   → lỗi INVALID_CREDENTIALS nếu sai
+5. Nếu có DeviceFingerprint:
+   a. DeviceRepository.ListActiveByUserID(userID) → đếm device
+   b. DevicePolicy.CanRegisterNewDevice(count) → lỗi nếu đã đủ 5
+   c. DeviceRepository.Upsert(device) → deviceID
+6. TokenManager.GenerateAccessToken(claims) → accessToken, expiresAt
+7. TokenManager.GenerateRefreshToken(userID) → rawRefreshToken
+8. hash = SHA-256(rawRefreshToken)
+9. SessionRepository.Upsert(session{userID, deviceID, hash, TTL=30days})
+   → sessionID
+10. RedisSessionService.SetUserSession(sessionID, sessionData, ttl)
+11. Return: LoginOutput{AccessToken, RefreshToken=rawToken, ExpiresAt}
+    (rawToken chỉ tồn tại 1 lần này, sau đó KHÔNG lưu đâu cả)
 ```
 
-### 10.3 Wire Provider Sets
+> **Lưu ý quan trọng:** Refresh token raw được trả về client rồi **không bao giờ xuất hiện lại trong backend**. DB chỉ lưu hash của nó. Khi client gửi lại, backend hash lại rồi so sánh.
+
+---
+
+### UC-03: RefreshToken — Làm mới Access Token
+
+**Input:** `RefreshTokenCommand{RawRefreshToken}`
 
 ```
-internal/bootstrap/providers.go
-└── APISet
-    ├── PlatformSet
-    │   ├── ProvideConfig() *config.Config
-    │   ├── ProvideLogger() *zap.Logger
-    │   ├── ProvideDBPool() *pgxpool.Pool
-    │   ├── ProvideTxManager() *tx.Manager
-    │   ├── ProvideTxManagerInterface(*tx.Manager) tx.TxManager
-    │   ├── ProvideRedis() *goredis.Client
-    │   └── ProvideAuthManager() *auth.Auth          ← giữ cho HTTP middleware
-    ├── HTTPSet
-    │   ├── ProvideGinEngine()
-    │   └── ProvideHTTPServer()
-    ├── ModuleSet
-    │   ├── identity_postgres.ProviderSet
-    │   │   └── 5 repos + QueryRepository
-    │   ├── identity_adapters.ProviderSet
-    │   │   ├── ProvideBcryptHasher(cfg)                ← dùng platform/auth.NewBcryptHasher
-    │   │   ├── ProvideJWTTokenManager(cfg)             ← wrap platform/auth.NewJWTTokenManager với bridge
-    │   │   ├── ProvideRedisVerificationTokenService(rdb) ← dùng platform/auth.NewRedisVerificationTokenService
-    │   │   ├── ProvideLogEventPublisher(log)           ← adapters-only
-    │   │   └── ProvideRealClock()                      ← adapters-only
-    │   └── identity_service.ProviderSet
-    │       ├── NewAuthService(...) *AuthService
-    │       ├── NewProfileService(...) *ProfileService
-    │       ├── NewAddressService(...) *AddressService
-    │       ├── ProvideRegisterPolicy() policy.RegisterPolicy
-    │       └── ProvideDevicePolicy() policy.DevicePolicy
-    └── ProvideAPIApp()
+1. hash = SHA-256(rawRefreshToken)
+2. Cache-aside: RedisSessionService.GetUserSession(sessionID)
+   - Nếu hit: lấy sessionData từ Redis
+   - Nếu miss: SessionRepository.GetByRefreshTokenHash(hash) → session
+               rồi SetUserSession vào Redis cache
+3. [BEGIN TRANSACTION]
+   a. SessionRepository.GetByRefreshTokenHashForUpdate(hash) → SELECT FOR UPDATE
+      (khóa row này lại để chống race condition khi 2 request refresh cùng lúc)
+   b. Kiểm tra session.IsRevoked() và session.IsExpired(now)
+   c. TokenManager.GenerateRefreshToken(userID) → newRawToken
+   d. newHash = SHA-256(newRawToken)
+   e. session.Rotate(newHash, now) → cập nhật hash + gia hạn 30 ngày
+   f. SessionRepository.Update(session) → ghi hash mới vào DB
+   g. TokenManager.GenerateAccessToken(claims) → newAccessToken
+4. [COMMIT]
+5. RedisSessionService.SetUserSession(sessionID, updatedData, newTTL)
+6. Return: RefreshTokenOutput{AccessToken, RefreshToken=newRawToken, ExpiresAt}
+```
+
+> **SELECT FOR UPDATE:** Khóa pessimistic ở cấp DB row. Khi 2 tab browser đồng thời gọi /refresh-token, cái nào chạm vào lock trước sẽ xử lý, cái kia phải chờ. Tránh trường hợp cả 2 đều thấy token cũ hợp lệ và sinh ra 2 token mới từ 1 token cũ.
+
+---
+
+### UC-04: Logout — Đăng xuất
+
+**Input:** `LogoutCommand{SessionID, DeviceID}` (từ JWT claims)
+
+```
+1. SessionRepository.Revoke(sessionID, now)
+2. RedisSessionService.DeleteSession(sessionID)
+3. Nếu có DeviceID: DeviceRepository.Revoke(deviceID, now)  [optional]
 ```
 
 ---
 
-## 11. HTTP API Specification
+### UC-05: VerifyEmail — Xác minh email
 
-### 11.1 Auth API
+**Input:** `VerifyEmailCommand{Token}`
 
-#### POST `/api/v1/auth/register`
-
-- **Description**: Đăng ký tài khoản mới.
-- **Headers**:
-- `Idempotency-Key`: (String, Required) UUID dùng để chống trùng lặp request.
-- **Body**: `RegisterRequest`
-- **Response (201)**: `REGISTER_SUCCESS`
-- Headers: `X-Idempotency-Replayed: true` (nếu request được phục hồi từ Redis).
+```
+1. RedisSessionService.ParseVerifyToken(token) → userID
+   (atomic GetDel: lấy xong xóa luôn — token chỉ dùng được 1 lần)
+2. UserRepository.MarkEmailVerified(userID, now)
+   (idempotent: COALESCE(email_verified_at, $now) → gọi 2 lần cũng không sao)
+```
 
 ---
 
-## 12. Error Catalogue
+### UC-06: ChangePassword — Đổi mật khẩu
 
-Tất cả lỗi domain được định nghĩa trong `domain/error/errors.go`:
+**Input:** `ChangePasswordCommand{UserID, SessionID, CurrentPassword, NewPassword}`
 
-| Error Code                           | HTTP Mapping | Mô tả                               |
-| ------------------------------------ | ------------ | ----------------------------------- |
-| `IDENTITY_USER_NOT_FOUND`            | 404          | Không tìm thấy user                 |
-| `IDENTITY_EMAIL_ALREADY_EXIST`       | 409          | Email đã tồn tại                    |
-| `IDENTITY_INVALID_CREDENTIALS`       | 401          | Sai email hoặc mật khẩu             |
-| `IDENTITY_EMAIL_NOT_VERIFIED`        | 403          | Email chưa được xác minh            |
-| `IDENTITY_SESSION_EXPIRED`           | 401          | Session đã hết hạn                  |
-| `IDENTITY_SESSION_REVOKED`           | 401          | Session đã bị thu hồi               |
-| `IDENTITY_DEVICE_LIMIT`              | 422          | Đã đạt giới hạn số device (5)       |
-| `IDENTITY_DEVICE_NOT_OWNED`          | 403          | Device không thuộc user này         |
-| `IDENTITY_ADDRESS_NOT_FOUND`         | 404          | Địa chỉ không tồn tại               |
-| `IDENTITY_ADDRESS_NOT_OWNED`         | 403          | Địa chỉ không thuộc user này        |
-| `IDENTITY_INVALID_STATUS_TRANSITION` | 422          | Chuyển trạng thái user không hợp lệ |
+```
+1. CredentialRepository.GetByUserID(userID)
+2. PasswordHasher.Verify(currentPassword, credential.PasswordHash)
+   → lỗi INVALID_CREDENTIALS nếu sai
+3. Kiểm tra newPassword != currentPassword (không cho đổi sang pass cũ)
+4. RegisterPolicy.ValidatePassword(newPassword)
+5. PasswordHasher.Hash(newPassword) → newHash
+6. [BEGIN TRANSACTION]
+   a. CredentialRepository.UpdatePasswordHash(userID, newHash, now)
+   b. SessionRepository.RevokeAllExcept(userID, currentSessionID, now)
+      (thu hồi tất cả session NGOẠI TRỪ session đang dùng hiện tại)
+7. [COMMIT]
+8. Lấy list sessionID đã bị revoke → xóa khỏi Redis cache
+9. Thêm JTI của các access token cũ vào blacklist Redis
+   (để chúng không thể dùng trong 15 phút còn lại của TTL)
+```
 
----
-
-## 13. Platform Dependencies
-
-Module identity phụ thuộc vào các platform packages:
-
-| Package                | Vai trò                                                            |
-| ---------------------- | ------------------------------------------------------------------ |
-| `platform/auth`        | `*auth.Auth` giữ cho HTTP middleware — validate access token       |
-| `platform/tx`          | `TxManager` interface + `*Manager` impl + `GetExecutor(ctx, pool)` |
-| `platform/db`          | pgxpool connection pool                                            |
-| `platform/redis`       | `*goredis.Client` — dùng cho verification token và Idempotency     |
-| `platform/config`      | JWT config (secret, AccessTokenTTL, RefreshTokenTTL, BcryptCost)   |
-| `platform/outbox`      | Implement Transactional Outbox pattern                             |
-| `platform/idempotency` | Middleware và Service quản lý tính idempotent cho API              |
-
-**Token lifetimes:**
-
-- Access token TTL: env `JWT_ACCESS_TOKEN_TTL_MINUTES` (mặc định: 15 phút) ✅
-- Session TTL: `DevicePolicy.MaxSessionTTL` × 24h (mặc định: **30 ngày**)
+> **Tại sao giữ lại session hiện tại?** UX tốt hơn — user không bị đăng xuất ngay sau khi đổi mật khẩu thành công. Nhưng tất cả thiết bị khác đều bị đăng xuất.
 
 ---
 
-## 14. Ghi chú & Known Issues
+## 10. HTTP Layer — Từ Request đến Response
 
-### ⚠️ Tồn động cần xử lý
-
-| #   | Vị trí                    | Vấn đề                                                                                                               | Mức độ     |
-| --- | ------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------- |
-| 1   | `query_repo.go` `queryMe` | SELECT thiếu các cột `phone`, `user_type`, `locked_reason`, `metadata`, `version`, `last_login_at` so với `scanUser` | **MEDIUM** |
-| 2   | `auth.go` `*auth.Auth`    | Chỉ giữ lại để HTTP middleware validate access token — không còn dùng trong service                                  | INFO       |
-| 3   | `Outbox Worker`           | Cần implement vòng lặp Dispatch trong `cmd/worker/main.go` để xử lý event liên tục.                                  | **HIGH**   |
-
-### 📌 Việc cần làm tiếp theo
+### 10.1 Cấu trúc file
 
 ```
 http/
-  handler/    ← AuthHandler, ProfileHandler, AddressHandler
-  middleware/ ← AuthMiddleware (dùng *auth.Auth để validate JWT, inject userID vào ctx)
-  router.go   ← Route registration
+├── auth_handler.go        ← Xử lý tất cả endpoint auth
+├── request.go             ← JSON binding structs + validation tags
+├── response.go            ← Response format structs
+├── router.go              ← Khai báo routes, gán middleware
+└── middleware/
+    ├── auth_middleware.go  ← Xác thực JWT Bearer token
+    └── strict_auth.go      ← Kiểm tra JTI blacklist
 ```
 
-### ✅ Đã implement (v1.1)
+### 10.2 Request structs (request.go)
 
-- Domain entities với behavior methods đầy đủ
-- State machine `UserStatus` với `CanTransitionTo`
-- Repository implementations (5 repo + 1 query repo)
-- Anti-corruption layer (`rows.go` → `mapper.go`)
-- Transaction management (`tx.TxManager.WithinTransaction`)
-- **Port interfaces** (`PasswordHasher`, `TokenManager`, `VerificationTokenService`, `EventPublisher`, `Clock`)
-- **Port adapters** (`BcryptHasher`, `JWTTokenManager`, `RedisVerificationTokenService`, `OutboxEventPublisher`, `RealClock`)
-- **Transactional Outbox**: Ghi event `user.registered` vào DB đồng bộ với registration transaction.
-- **Idempotency**: Tích hợp middleware cho API Register, sử dụng Redis store.
-- **E2E Testing**: Đã có bộ test `tests/e2e_register_test.go` kiểm thử toàn bộ luồng Register + Idempotency + Outbox.
-- **Application services** (`AuthService` — Register, Login, RefreshToken, Logout, VerifyEmail)
-- **DTOs** (`RegisterInput/Output`, `LoginInput/Output`, `RefreshTokenInput/Output`...)
-- **Commands** (9 command structs)
-- Idempotent operations (revoke, verify email)
-- `SELECT FOR UPDATE` trong refresh token rotation flow
-- Verification token single-use (Redis `GetDel`)
-- Partial unique index cho default address
-- Ownership enforcement (`AssertOwnership`) trước mọi mutation
-- Wire DI đầy đủ (PlatformSet + ModuleSet)
+```go
+type RegisterRequest struct {
+    Email    string `json:"email"    binding:"required,email,max=255"`
+    Password string `json:"password" binding:"required,min=8,max=72"`
+    FullName string `json:"full_name" binding:"required,max=255"`
+    Phone    string `json:"phone"    binding:"omitempty,max=20"`
+}
 
-bookstore-backend-v2/internal/modules/identity/
-│
-├── domain/ # 1. TẦNG CỐT LÕI (CORE) - Bất biến, không phụ thuộc framework
-│ ├── entity/ # Các thực thể mang dữ liệu và trạng thái
-│ │ ├── user.go  
-│ │ ├── credential.go  
-│ │ ├── session.go  
-│ │ ├── device.go  
-│ │ └── address.go  
-│ ├── value_object/ # Các kiểu dữ liệu ràng buộc nghiệp vụ
-│ │ ├── email.go  
-│ │ └── user_status.go  
-│ ├── policy/ # Luật nghiệp vụ (Business Rules)
-│ │ ├── register_policy.go  
-│ │ └── device_policy.go  
-│ ├── error/ # Mã lỗi chuẩn hóa của riêng module
-│ │ └── errors.go  
-│ └── repository.go # CÁC INTERFACE ĐỂ GHI (Write-side contracts)
-│
-├── app/ # 2. TẦNG ĐIỀU PHỐI (APPLICATION) - Orchestration & Use Cases
-│ ├── command/ # Định nghĩa Input cho thao tác GHI
-│ │ ├── register_command.go  
-│ │ ├── login_command.go  
-│ │ └── refresh_command.go  
-│ ├── query/ # Định nghĩa Input/Output & Interface cho thao tác ĐỌC (CQRS-lite)
-│ │ ├── query_repository.go  
-│ │ └── views.go # (MeView, SessionView, DeviceView...)
-│ ├── dto/ # Data Transfer Objects trả về cho HTTP
-│ │ ├── register_output.go  
-│ │ └── login_output.go  
-│ ├── ports/ # CÁC INTERFACE YÊU CẦU NGOẠI VI (Outbound Ports)
-│ │ ├── token_manager.go  
-│ │ ├── password_hasher.go  
-│ │ └── event_publisher.go  
-│ └── service/ # Kẻ nhạc trưởng điều phối nghiệp vụ
-│ ├── auth_service.go  
-│ ├── user_service.go  
-│ └── providers.go # (Wire ProviderSet cho tầng App)
-│
-├── infra/ # 3. TẦNG HẠ TẦNG (INFRASTRUCTURE) - Các Implementation thực tế
-│ ├── postgres/ # Giao tiếp với DB (Sử dụng pgx)
-│ │ ├── user_repository.go  
-│ │ ├── session_repository.go
-│ │ ├── device_repository.go
-│ │ ├── address_repository.go
-│ │ ├── query_repository.go # Cắm thẳng SQL để lấy View tối ưu đọc
-│ │ ├── mapper.go # Map từ DB row -> Entity / View
-│ │ └── providers.go # (Wire ProviderSet cho DB)
-│ └── adapter/ # Các công cụ bên thứ 3 (Thợ xây đắp ứng dụng)
-│ ├── redis_verify_token.go# Implement VerificationTokenService
-│ ├── bcrypt_hasher.go # Implement PasswordHasher
-│ ├── jwt_manager.go # Implement TokenManager
-│ └── providers.go # (Wire ProviderSet cho Adapter)
-│
-└── interfaces/ # 4. TẦNG GIAO TIẾP NGOÀI (ENTRYPOINTS / INBOUND PORTS)
-├── http/ # Nhận HTTP Request từ client
-│ ├── auth_handler.go # Chuyển JSON -> Command -> gọi AuthService
-│ ├── user_handler.go  
-│ └── router.go # Khai báo các endpoint & gán Idempotency middleware
-└── consumer/ # (Nếu có) Nhận event từ Kafka
-└── outbox_worker.go # Polling bảng outbox_events và dispatch lên Kafka
+type LoginRequest struct {
+    Email             string `json:"email"              binding:"required,email"`
+    Password          string `json:"password"           binding:"required"`
+    DeviceFingerprint string `json:"device_fingerprint" binding:"omitempty"`
+    DeviceLabel       string `json:"device_label"       binding:"omitempty,max=255"`
+}
+
+type ChangePasswordRequest struct {
+    CurrentPassword string `json:"current_password" binding:"required"`
+    NewPassword     string `json:"new_password"     binding:"required,min=8,max=72"`
+}
+```
+
+> **`binding:"required"`** là Gin validation tag — tự động trả 400 nếu thiếu field này mà không cần viết code kiểm tra thủ công.
+
+### 10.3 Auth Context — Cách truyền thông tin user qua middleware
+
+```go
+type AuthContext struct {
+    UserID    int64
+    Email     string
+    Role      string
+    SessionID int64
+    DeviceID  int64
+    JTI       string  // JWT unique ID (dùng cho blacklist)
+}
+```
+
+Middleware ghi `AuthContext` vào `gin.Context`. Handler đọc ra:
+
+```go
+// Trong handler:
+authCtx := ctx.MustGet("auth_context").(*middleware.AuthContext)
+userID := authCtx.UserID
+```
+
+### 10.4 Luồng cookie cho Refresh Token
+
+**Login response:**
+```
+HTTP/1.1 200 OK
+Set-Cookie: refresh_token=<raw_token>; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000
+Content-Type: application/json
+
+{ "access_token": "eyJ...", "expires_at": "2026-05-15T..." }
+```
+
+**Refresh request:**
+```
+POST /api/v1/auth/refresh-token
+Cookie: refresh_token=<raw_token>
+```
+
+> **HTTP-only cookie:** Browser tự động gửi cookie theo mỗi request mà không cần JavaScript xử lý. JavaScript cũng KHÔNG thể đọc cookie này (HttpOnly) → chống XSS attack đánh cắp refresh token.
+
+---
+
+## 11. HTTP API Specification — Đặc tả đầy đủ
+
+### Base URL: `/api/v1`
+
+### Route Groups
+
+```
+/auth/register         POST   — Public (+ Idempotency middleware)
+/auth/login            POST   — Public
+/auth/verify-email     POST   — Public
+/auth/refresh-token    POST   — Auth middleware required
+/auth/logout           POST   — Auth middleware required
+/me                    GET    — Auth middleware required
+/me/change-password    POST   — Auth + Strict Auth middleware required
+```
+
+---
+
+### POST `/auth/register`
+
+**Mô tả:** Tạo tài khoản mới. Sau khi đăng ký, user nhận email chứa link xác minh.
+
+**Headers:**
+```
+Content-Type: application/json
+Idempotency-Key: <uuid>   (bắt buộc — chống tạo account trùng khi double-click)
+```
+
+**Request Body:**
+```json
+{
+  "email": "user@example.com",
+  "password": "Secret123",
+  "full_name": "Nguyen Van A",
+  "phone": "0901234567"
+}
+```
+
+**Validation rules:**
+- `email`: required, valid email format, max 255 ký tự
+- `password`: required, 8-72 ký tự, phải có chữ HOA + chữ thường + số
+- `full_name`: required, max 255 ký tự
+- `phone`: optional, max 20 ký tự
+
+**Response 201 Created:**
+```json
+{
+  "code": "REGISTER_SUCCESS",
+  "data": {
+    "user_id": 42,
+    "email": "user@example.com",
+    "message": "Registration successful. Please check your email to verify your account."
+  }
+}
+```
+
+**Response Header khi replay:**
+```
+X-Idempotency-Replayed: true
+```
+
+**Lỗi có thể gặp:**
+| HTTP | Code | Nguyên nhân |
+|---|---|---|
+| 409 | `IDENTITY_EMAIL_ALREADY_EXIST` | Email đã tồn tại |
+| 422 | `VALIDATION_ERROR` | Password yếu, email sai format |
+| 400 | `MISSING_IDEMPOTENCY_KEY` | Thiếu header Idempotency-Key |
+
+---
+
+### POST `/auth/login`
+
+**Mô tả:** Đăng nhập. Trả về access token trong body, refresh token trong HTTP-only cookie.
+
+**Request Body:**
+```json
+{
+  "email": "user@example.com",
+  "password": "Secret123",
+  "device_fingerprint": "a1b2c3d4...",
+  "device_label": "Chrome trên MacBook"
+}
+```
+
+**Response 200 OK:**
+```json
+{
+  "code": "LOGIN_SUCCESS",
+  "data": {
+    "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "expires_at": "2026-05-15T08:30:00Z"
+  }
+}
+```
+
+**Set-Cookie:**
+```
+refresh_token=<opaque_hex_64>; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000
+```
+
+**Lỗi có thể gặp:**
+| HTTP | Code | Nguyên nhân |
+|---|---|---|
+| 401 | `IDENTITY_INVALID_CREDENTIALS` | Sai email hoặc mật khẩu |
+| 403 | `IDENTITY_ACCOUNT_LOCKED` | Account bị khóa |
+| 422 | `IDENTITY_DEVICE_LIMIT` | Đã đăng nhập trên 5 thiết bị |
+
+---
+
+### POST `/auth/refresh-token`
+
+**Mô tả:** Dùng refresh token (từ cookie) để lấy access token mới. Cookie tự động được cập nhật.
+
+**Headers:** (Cookie tự động gửi kèm)
+```
+Authorization: Bearer <access_token>   (optional — chỉ cần Cookie)
+```
+
+**Request Body:** `{}` (trống)
+
+**Response 200 OK:**
+```json
+{
+  "code": "REFRESH_SUCCESS",
+  "data": {
+    "access_token": "eyJ...",
+    "expires_at": "2026-05-15T08:45:00Z"
+  }
+}
+```
+
+**Set-Cookie:** (refresh token mới)
+```
+refresh_token=<new_opaque_hex>; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000
+```
+
+**Lỗi có thể gặp:**
+| HTTP | Code | Nguyên nhân |
+|---|---|---|
+| 401 | `IDENTITY_SESSION_EXPIRED` | Refresh token đã hết hạn |
+| 401 | `IDENTITY_SESSION_REVOKED` | Session đã bị thu hồi |
+| 401 | `MISSING_TOKEN` | Không có cookie refresh_token |
+
+---
+
+### POST `/auth/logout`
+
+**Mô tả:** Đăng xuất — thu hồi session hiện tại.
+
+**Headers:**
+```
+Authorization: Bearer <access_token>
+```
+
+**Response 200 OK:**
+```json
+{
+  "code": "LOGOUT_SUCCESS",
+  "message": "Logged out successfully"
+}
+```
+
+**Hành vi:** Cookie `refresh_token` bị xóa trong response (`Max-Age=0`).
+
+---
+
+### POST `/auth/verify-email`
+
+**Mô tả:** Xác minh email qua token trong link email.
+
+**Request Body:**
+```json
+{
+  "token": "a3f9c2e1..."
+}
+```
+
+**Response 200 OK:**
+```json
+{
+  "code": "EMAIL_VERIFIED",
+  "message": "Email verified successfully"
+}
+```
+
+**Lỗi có thể gặp:**
+| HTTP | Code | Nguyên nhân |
+|---|---|---|
+| 400 | `INVALID_TOKEN` | Token không hợp lệ hoặc đã hết hạn |
+| 400 | `TOKEN_ALREADY_USED` | Token đã dùng rồi (single-use) |
+
+---
+
+### GET `/me`
+
+**Mô tả:** Lấy thông tin profile người dùng hiện tại.
+
+**Headers:**
+```
+Authorization: Bearer <access_token>
+```
+
+**Response 200 OK:**
+```json
+{
+  "code": "SUCCESS",
+  "data": {
+    "user_id": 42,
+    "email": "user@example.com",
+    "full_name": "Nguyen Van A",
+    "status": "active",
+    "email_verified_at": "2026-05-14T10:00:00Z",
+    "created_at": "2026-05-14T09:00:00Z"
+  }
+}
+```
+
+---
+
+### POST `/me/change-password`
+
+**Mô tả:** Đổi mật khẩu. Yêu cầu **Strict Auth** — kiểm tra JTI blacklist thêm lần nữa.
+
+**Headers:**
+```
+Authorization: Bearer <access_token>
+```
+
+**Request Body:**
+```json
+{
+  "current_password": "OldSecret123",
+  "new_password": "NewSecret456"
+}
+```
+
+**Response 200 OK:**
+```json
+{
+  "code": "PASSWORD_CHANGED",
+  "message": "Password changed successfully. Other sessions have been revoked."
+}
+```
+
+**Hành vi sau khi đổi mật khẩu:**
+- Session hiện tại: vẫn còn hiệu lực
+- Tất cả session khác: bị revoke ngay lập tức
+- Access token từ các session cũ: bị thêm vào JTI blacklist → hết hiệu lực ngay
+
+**Lỗi có thể gặp:**
+| HTTP | Code | Nguyên nhân |
+|---|---|---|
+| 401 | `IDENTITY_INVALID_CREDENTIALS` | Sai current_password |
+| 422 | `SAME_AS_OLD_PASSWORD` | New password giống password cũ |
+| 422 | `VALIDATION_ERROR` | New password không đủ mạnh |
+
+---
+
+## 12. Bảo mật — Các cơ chế bảo vệ
+
+### 12.1 Middleware Stack
+
+Mỗi request đi qua các middleware theo thứ tự:
+
+```
+Request
+  ↓
+[CORS Middleware]
+  ↓
+[Rate Limiting]        ← Giới hạn số request/giây
+  ↓
+[Auth Middleware]      ← Kiểm tra JWT (chỉ cho protected routes)
+  ↓
+[Strict Auth]          ← Kiểm tra JTI blacklist (chỉ cho /change-password)
+  ↓
+[Handler]
+```
+
+### 12.2 Auth Middleware (`auth_middleware.go`)
+
+**Chức năng:** Xác thực JWT Bearer token.
+
+```
+Request Header: Authorization: Bearer eyJ...
+                                       ↓
+              [Tách lấy token sau "Bearer "]
+                                       ↓
+              [authManager.ValidateAccessToken(token)]
+                 - Verify chữ ký HMAC-SHA256
+                 - Kiểm tra exp (thời hạn)
+                 - Parse claims: user_id, email, role, jti, session_id
+                                       ↓
+              [Ghi AuthContext vào gin.Context]
+                                       ↓
+              Handler tiếp tục xử lý
+```
+
+**Trả về 401 khi:**
+- Thiếu header Authorization → `MISSING_TOKEN`
+- Format sai (không có "Bearer ") → `INVALID_TOKEN_FORMAT`
+- JWT không hợp lệ hoặc hết hạn → `INVALID_TOKEN`
+
+### 12.3 Strict Auth Middleware (`strict_auth.go`)
+
+**Chức năng:** Thêm lớp bảo vệ thứ 2 cho các thao tác nhạy cảm (đổi mật khẩu).
+
+```
+[Sau Auth Middleware — đã có AuthContext]
+                ↓
+    [Lấy JTI từ AuthContext]
+                ↓
+    [BlacklistPort.IsTokenBlacklisted(jti)]
+                ↓
+    Nếu có lỗi Redis → CHẶN (fail-closed)
+    Nếu trong blacklist → 401
+    Nếu không → cho qua
+```
+
+> **Fail-closed:** Nếu Redis không trả lời (timeout, down), middleware chặn request thay vì cho qua. Hy sinh UX để đảm bảo security.
+
+### 12.4 Token Rotation (Chống Refresh Token Reuse)
+
+Mỗi lần `/refresh-token` được gọi:
+1. Refresh token cũ bị **vô hiệu hóa** trong DB (hash bị thay thế)
+2. Refresh token mới được tạo và trả về
+
+Nếu kẻ tấn công đánh cắp refresh token và dùng sau khi user đã refresh → token đó đã đổi → request thất bại.
+
+### 12.5 SELECT FOR UPDATE (Chống Race Condition)
+
+Scenario: User double-click nút "Refresh" → 2 request gửi cùng lúc.
+
+```
+Request A: SELECT session WHERE hash = 'abc'  → thấy hash 'abc' hợp lệ
+Request B: SELECT session WHERE hash = 'abc'  → thấy hash 'abc' hợp lệ
+Request A: UPDATE session SET hash = 'xyz'
+Request B: UPDATE session SET hash = 'pqr'    ← ĐÈ LÊN CỦA A!
+```
+
+Với `SELECT FOR UPDATE`:
+```
+Request A: SELECT ... FOR UPDATE → khóa row
+Request B: SELECT ... FOR UPDATE → PHẢI CHỜ A xong
+Request A: UPDATE hash = 'xyz', COMMIT, giải phóng lock
+Request B: SELECT lại → hash giờ là 'xyz', không phải 'abc' → token không khớp → lỗi
+```
+
+---
+
+## 13. Error Catalogue — Danh sách mã lỗi
+
+Tất cả domain errors định nghĩa tại `domain/error/errors.go`.
+
+| HTTP Status | Error Code | Tình huống |
+|---|---|---|
+| 401 | `IDENTITY_INVALID_CREDENTIALS` | Sai email hoặc mật khẩu |
+| 401 | `IDENTITY_SESSION_EXPIRED` | Refresh token đã hết hạn 30 ngày |
+| 401 | `IDENTITY_SESSION_REVOKED` | Session đã bị thu hồi (logout, đổi pass) |
+| 401 | `MISSING_TOKEN` | Thiếu Authorization header |
+| 401 | `INVALID_TOKEN_FORMAT` | Header không đúng định dạng "Bearer ..." |
+| 401 | `INVALID_TOKEN` | JWT không hợp lệ hoặc hết 15 phút |
+| 403 | `IDENTITY_EMAIL_NOT_VERIFIED` | Thao tác yêu cầu email đã verify |
+| 403 | `IDENTITY_ACCOUNT_LOCKED` | Account bị khóa/disabled |
+| 403 | `IDENTITY_DEVICE_NOT_OWNED` | Device không thuộc user này |
+| 403 | `IDENTITY_ADDRESS_NOT_OWNED` | Địa chỉ không thuộc user này |
+| 404 | `IDENTITY_USER_NOT_FOUND` | Không tìm thấy user |
+| 404 | `IDENTITY_ADDRESS_NOT_FOUND` | Địa chỉ không tồn tại |
+| 409 | `IDENTITY_EMAIL_ALREADY_EXIST` | Email đã được đăng ký |
+| 422 | `IDENTITY_DEVICE_LIMIT` | Đã đăng nhập trên 5 thiết bị |
+| 422 | `IDENTITY_INVALID_STATUS_TRANSITION` | Chuyển trạng thái user không hợp lệ |
+| 422 | `SAME_AS_OLD_PASSWORD` | Mật khẩu mới giống mật khẩu cũ |
+
+---
+
+## 14. Dependency Injection & Wire
+
+> **Giải thích đơn giản:** Wire là công cụ tự động "lắp ráp" các dependency. Bạn khai báo "AuthService cần UserRepository, CredentialRepository, TokenManager..." — Wire tự viết code khởi tạo.
+
+### Sơ đồ dependency
+
+```
+bootstrap/providers.go
+└── APISet
+    ├── PlatformSet
+    │   ├── Config (đọc từ env)
+    │   ├── Logger (zap)
+    │   ├── PostgreSQL pool (pgxpool)
+    │   ├── TxManager (quản lý transaction)
+    │   └── Redis client (goredis)
+    │
+    ├── identity/infra/postgres (DB implementations)
+    │   ├── UserRepository
+    │   ├── CredentialRepository
+    │   ├── SessionRepository
+    │   ├── DeviceRepository
+    │   ├── AddressRepository
+    │   └── QueryRepository
+    │
+    ├── identity/infra/adapters (Port implementations)
+    │   ├── BcryptHasher           → ports.PasswordHasher
+    │   ├── jwtTokenManagerBridge  → ports.TokenManager
+    │   ├── RedisSessionService    → ports.RedisSessionService
+    │   ├── RedisBlacklistAdapter  → ports.BlacklistPort
+    │   ├── OutboxEventPublisher   → ports.EventPublisher
+    │   └── RealClock              → ports.Clock
+    │
+    └── identity/app/service (Use Cases)
+        ├── AuthService (nhận tất cả repos + ports ở trên)
+        ├── ProfileService
+        └── AddressService
+```
+
+### Tại sao cần `jwtTokenManagerBridge`?
+
+`platform/auth.JWTTokenManager` sử dụng kiểu `auth.JWTClaims`.
+`identity/app/ports.TokenManager` yêu cầu kiểu `ports.AccessTokenClaims`.
+
+Hai kiểu này không thể tự chuyển đổi vì `platform/auth` không được phép import `identity/app/ports` (vi phạm nguyên tắc phân lớp). Bridge là adapter trung gian:
+
+```go
+type jwtTokenManagerBridge struct{ inner *auth.JWTTokenManager }
+
+func (b *jwtTokenManagerBridge) GenerateAccessToken(ctx, c ports.AccessTokenClaims) (string, time.Time, error) {
+    return b.inner.GenerateAccessToken(ctx, auth.JWTClaims{
+        UserID: c.UserID, Email: c.Email, Role: c.Role, Type: c.Type,
+    })
+}
+```
+
+---
+
+## 15. Platform Dependencies
+
+Module identity không tự implement các thành phần infrastructure cấp thấp. Chúng được cung cấp từ `internal/platform/`:
+
+| Package | Vai trò | Được dùng bởi |
+|---|---|---|
+| `platform/auth` | JWT tạo/xác thực, bcrypt hash, Redis verify token | `identity/infra/adapters` |
+| `platform/tx` | Transaction manager (`WithinTransaction`) | `AuthService` |
+| `platform/db` | PostgreSQL connection pool | Tất cả repositories |
+| `platform/redis` | Redis client | `RedisSessionService`, `BlacklistPort` |
+| `platform/config` | JWT config (secret, TTL, bcrypt cost) | Token manager, hasher |
+| `platform/outbox` | Transactional Outbox (ghi event vào DB) | `EventPublisher` |
+| `platform/idempotency` | Middleware + Redis store cho Idempotency-Key | Route `/register` |
+
+**Token lifetimes (từ config/env):**
+
+| Token | Env Variable | Default |
+|---|---|---|
+| Access token | `JWT_ACCESS_TOKEN_TTL_MINUTES` | 15 phút |
+| Refresh token / Session | Hardcoded trong `DevicePolicy.MaxSessionTTL` | 30 ngày |
+| Email verify token | Hardcoded trong `RedisVerificationTokenService` | 24 giờ |

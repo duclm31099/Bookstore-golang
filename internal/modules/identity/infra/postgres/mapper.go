@@ -72,31 +72,35 @@ func mapSessionRowToView(r *sessionRow) *query.SessionView {
 
 func mapAddressRowToEntity(r *addressRow) *entity.Address {
 	return &entity.Address{
-		ID:          r.ID,
-		UserID:      r.UserID,
-		Line1:       r.Line1,
-		Line2:       r.Line2,
-		Province:    r.Province,
-		District:    r.District,
-		Ward:        r.Ward,
-		PostalCode:  r.PostalCode,
-		CountryCode: r.CountryCode,
-		IsDefault:   r.IsDefault,
-		Version:     r.Version,
-		CreatedAt:   r.CreatedAt,
-		UpdatedAt:   r.UpdatedAt,
+		ID:             r.ID,
+		UserID:         r.UserID,
+		RecipientName:  r.RecipientName,
+		RecipientPhone: r.RecipientPhone,
+		Line1:          r.Line1,
+		Line2:          r.Line2,
+		Province:       r.Province,
+		District:       r.District,
+		Ward:           r.Ward,
+		PostalCode:     r.PostalCode,
+		CountryCode:    r.CountryCode,
+		IsDefault:      r.IsDefault,
+		Version:        r.Version,
+		CreatedAt:      r.CreatedAt,
+		UpdatedAt:      r.UpdatedAt,
 	}
 }
 
 func mapAddressRowToView(r *addressRow) *query.AddressView {
 	return &query.AddressView{
-		ID:        r.ID,
-		Line1:     r.Line1,
-		Line2:     r.Line2,
-		Province:  r.Province,
-		District:  r.District,
-		Ward:      r.Ward,
-		IsDefault: r.IsDefault,
+		ID:             r.ID,
+		RecipientName:  r.RecipientName,
+		RecipientPhone: r.RecipientPhone,
+		Line1:          r.Line1,
+		Line2:          r.Line2,
+		Province:       r.Province,
+		District:       r.District,
+		Ward:           r.Ward,
+		IsDefault:      r.IsDefault,
 	}
 }
 

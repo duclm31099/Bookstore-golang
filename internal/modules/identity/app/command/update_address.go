@@ -1,14 +1,16 @@
 package command
 
 type UpdateAddressCommand struct {
-	ID           int64
-	UserID       int64
-	Line1        string
-	Line2        string
-	ProvinceCode string
-	DistrictCode string
-	WardCode     string
-	PostalCode   string
-	CountryCode  string
-	IsDefault    bool
+	ID             int64
+	UserID         int64
+	RecipientName  string
+	RecipientPhone string
+	Line1          string
+	Line2          string
+	ProvinceCode   string
+	DistrictCode   string
+	WardCode       string
+	PostalCode     string
+	CountryCode    string
+	IsDefault      bool
 }
