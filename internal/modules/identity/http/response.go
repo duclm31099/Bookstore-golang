@@ -17,6 +17,7 @@ const (
 	AddAddressSuccess        = "ADD_ADDRESS_SUCCESS"
 	UpdateAddressSuccess     = "UPDATE_ADDRESS_SUCCESS"
 	DeleteAddressSuccess     = "DELETE_ADDRESS_SUCCESS"
+	ChangePasswordSuccess    = "CHANGE_PASSWORD_SUCCESS"
 
 	NotAuthenticated = "NOT_AUTHENTICATED"
 	SessionRevoked   = "SESSION_REVOKED"

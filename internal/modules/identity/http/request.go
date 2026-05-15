@@ -40,3 +40,7 @@ type AddressRequest struct {
 	CountryCode  string `json:"country_code"`
 	IsDefault    bool   `json:"is_default"`
 }
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"current_password" binding:"required"`
+	NewPassword     string `json:"new_password" binding:"required"`
+}

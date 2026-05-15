@@ -1,6 +1,14 @@
 package dto
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+var (
+	ErrSameAsOldPassword  = errors.New("new password must be different from current password")
+	ErrInvalidCredentials = errors.New("invalid current password")
+)
 
 type RegisterInput struct {
 	Email    string

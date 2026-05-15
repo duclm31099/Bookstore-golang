@@ -1,14 +1,18 @@
 package http
 
-import "github.com/gin-gonic/gin"
+import (
+	"github.com/duclm99/bookstore-backend-v2/internal/modules/identity/http/middleware"
+	"github.com/gin-gonic/gin"
+)
 
 func RegisterRoutes(
 	r *gin.Engine,
 	authHandler *AuthHandler,
 	profileHandler *ProfileHandler,
 	addressHandler *AddressHandler,
-	authMiddleware gin.HandlerFunc,
+	authMiddleware middleware.AuthMiddleware,
 	idempotencyMiddleware gin.HandlerFunc,
+	strictAuthMiddleware middleware.StrictAuthMiddleware,
 ) {
 	api := r.Group("/api/v1")
 
@@ -16,17 +20,18 @@ func RegisterRoutes(
 	{
 		auth.POST("/register", idempotencyMiddleware, authHandler.Register)
 		auth.POST("/login", idempotencyMiddleware, authHandler.Login)
-		auth.POST("/refresh-token", authMiddleware, idempotencyMiddleware, authHandler.RefreshToken)
+		auth.POST("/refresh-token", gin.HandlerFunc(authMiddleware), idempotencyMiddleware, authHandler.RefreshToken)
 		auth.POST("/verify-email", idempotencyMiddleware, authHandler.VerifyEmail)
-		auth.POST("/logout", authMiddleware, idempotencyMiddleware, authHandler.Logout)
+		auth.POST("/logout", gin.HandlerFunc(authMiddleware), idempotencyMiddleware, authHandler.Logout)
 	}
 
 	me := api.Group("/me")
-	me.Use(authMiddleware)
+	me.Use(gin.HandlerFunc(authMiddleware))
 	{
 		me.GET("", profileHandler.GetMe)
 		me.GET("/sessions", profileHandler.ListSessions)
 		me.DELETE("/sessions", profileHandler.RevokeAllSessions)
+		me.POST("/change-password", gin.HandlerFunc(strictAuthMiddleware), idempotencyMiddleware, authHandler.ChangePassword)
 
 		me.GET("/devices", profileHandler.ListDevices)
 		me.DELETE("/devices/:deviceId", profileHandler.RevokeDevice)

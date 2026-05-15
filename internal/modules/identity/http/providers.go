@@ -14,4 +14,5 @@ var ProviderSet = wire.NewSet(
 
 	// 2. Middlewares
 	middleware.NewAuthMiddleware,
+	middleware.NewStrictAuthMiddleware,
 )

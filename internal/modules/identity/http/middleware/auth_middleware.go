@@ -34,6 +34,7 @@ type AuthContext struct {
 	DeviceID  int64
 	SessionID int64
 }
+type AuthMiddleware gin.HandlerFunc
 
 // NewAuthMiddleware trả về Gin middleware xác thực Bearer JWT.
 //
@@ -42,7 +43,7 @@ type AuthContext struct {
 //  2. Gọi authManager.ValidateAccessToken để verify chữ ký + expiry + type="access"
 //  3. Nếu hợp lệ → lưu AuthContext vào gin.Context rồi c.Next()
 //  4. Nếu không hợp lệ → 401 JSON + c.Abort() (không gọi handler tiếp theo)
-func NewAuthMiddleware(authManager *auth.Auth) gin.HandlerFunc {
+func NewAuthMiddleware(authManager *auth.Auth) AuthMiddleware {
 	return func(c *gin.Context) {
 		// Lấy Authorization header
 		authHeader := c.GetHeader(AuthorizationHeader)

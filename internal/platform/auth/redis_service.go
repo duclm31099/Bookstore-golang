@@ -76,3 +76,22 @@ func (s *RedisSessionService) SetUserSession(ctx context.Context, key string, va
 func (s *RedisSessionService) GetUserSession(ctx context.Context, key string) (any, error) {
 	return s.rdb.Get(ctx, key).Result()
 }
+
+func (r *RedisSessionService) DeleteMultipleSessions(ctx context.Context, keys []string) error {
+	// Rất quan trọng: Check slice rỗng để tránh gọi Redis vô ích
+	if len(keys) == 0 {
+		return nil
+	}
+
+	// redisClient.Del nhận vào variadic arguments (...string)
+	// Lệnh này trả về số lượng key thực sự bị xóa và error
+	_, err := r.rdb.Del(ctx, keys...).Result()
+	if err != nil {
+		return fmt.Errorf("redis delete multiple sessions failed: %w", err)
+	}
+
+	// (Tuỳ chọn) Bạn có thể log số lượng key đã xóa để debug
+	// zap.L().Debug("Deleted multiple sessions", zap.Int64("count", deletedCount))
+
+	return nil
+}

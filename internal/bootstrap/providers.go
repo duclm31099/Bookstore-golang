@@ -8,6 +8,7 @@ import (
 
 	identity_service "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/app/service"
 	identity_http "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/http"
+	identity_middleware "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/http/middleware"
 	identity_adapters "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/infra/adapters"
 	identity_postgres "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/infra/postgres"
 	auth "github.com/duclm99/bookstore-backend-v2/internal/platform/auth"
@@ -119,8 +120,9 @@ func ProvideGinEngine(
 	authHandler *identity_http.AuthHandler,
 	profileHandler *identity_http.ProfileHandler,
 	addressHandler *identity_http.AddressHandler,
-	authMiddleware gin.HandlerFunc,
+	authMiddleware identity_middleware.AuthMiddleware,
 	idempotencySvc idempotency.Service,
+	strictAuthMiddleware identity_middleware.StrictAuthMiddleware,
 ) *gin.Engine {
 	engine := httpx.NewRouter(cfg, log)
 
@@ -135,7 +137,7 @@ func ProvideGinEngine(
 	})
 
 	// Nhúng router identity
-	identity_http.RegisterRoutes(engine, authHandler, profileHandler, addressHandler, authMiddleware, idempotencyMiddleware)
+	identity_http.RegisterRoutes(engine, authHandler, profileHandler, addressHandler, authMiddleware, idempotencyMiddleware, strictAuthMiddleware)
 
 	return engine
 }

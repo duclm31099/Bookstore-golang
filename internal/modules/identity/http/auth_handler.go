@@ -29,6 +29,8 @@ type AuthUseCase interface {
 	RefreshToken(ctx context.Context, cmd command.RefreshTokenCommand) (*dto.RefreshTokenOutput, error)
 	Logout(ctx context.Context, cmd command.LogoutCommand) error
 	VerifyEmail(ctx context.Context, cmd command.VerifyEmailCommand) error
+
+	ChangePassword(ctx context.Context, cmd command.ChangePasswordCommand) error
 }
 
 func (h *AuthHandler) Register(c *gin.Context) {
@@ -55,6 +57,24 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	}
 
 	httpx.Success(c, http.StatusCreated, RegisterSuccess, result)
+}
+
+func (h *AuthHandler) ChangePassword(c *gin.Context) {
+	var req ChangePasswordRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+
+	err := h.authService.ChangePassword(c.Request.Context(), command.ChangePasswordCommand{
+		CurrentPassword: req.CurrentPassword,
+		NewPassword:     req.NewPassword,
+	})
+	if err != nil {
+		writeAuthError(c, err)
+		return
+	}
+
+	httpx.Success(c, http.StatusOK, ChangePasswordSuccess, nil)
 }
 
 func (h *AuthHandler) Login(c *gin.Context) {

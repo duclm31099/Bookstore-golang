@@ -199,22 +199,28 @@ func (s *AuthService) Login(ctx context.Context, cmd command.LoginCommand) (*dto
 		device.FirstSeenAt = existDevice.FirstSeenAt
 	}
 
-	// Save device information to DB
+	// 7. Save device information to DB
 	if err := s.devices.Upsert(ctx, device); err != nil {
 		return nil, err
 	}
 	deviceID = device.ID
 
-	// 9. DỌN DẸP REDIS (BƯỚC CHỐNG RÒ RỈ TOKEN)
+	// 8. DỌN DẸP REDIS (BƯỚC CHỐNG RÒ RỈ TOKEN)
 	// Nếu user login lại trên cùng 1 device, ta phải tìm session cũ và xóa nó khỏi Redis
 	// để đảm bảo Refresh Token cũ lập tức bị vô hiệu hóa.
 	oldSession, err := s.sessions.GetByDeviceID(ctx, user.ID, deviceID)
 	if err == nil && oldSession != nil {
 		oldRedisKey := ports.RedisSessionKeyPrefix + string(oldSession.RefreshTokenHash)
+		zap.L().Info("identity:Deleting old session in Redis", zap.String("oldRedisKey", oldRedisKey))
 		err = s.redisSession.DeleteSession(ctx, oldRedisKey)
-		zap.L().Warn("identity:Failed to delete old session in Redis", zap.Error(err))
+		if err != nil {
+			zap.L().Warn("identity:Failed to delete old session in Redis", zap.Error(err), zap.String("oldRedisKey", oldRedisKey))
+		} else {
+			// Tùy chọn: Log info để biết đã xóa thành công (giống với dòng log msg:"identity:Deleting old session in Redis" của bạn)
+			zap.L().Info("identity:Successfully deleted old session in Redis", zap.String("oldRedisKey", oldRedisKey))
+		}
 	}
-	// 8. Create refresh token
+	// 9. Create refresh token
 	rawRefreshToken, err := s.authManager.GenerateRefreshToken(
 		user.ID,
 		user.Email.String(),
@@ -424,6 +430,78 @@ func (s *AuthService) VerifyEmail(ctx context.Context, cmd command.VerifyEmailCo
 	}
 
 	return s.users.MarkEmailVerified(ctx, userID, s.clock.Now())
+}
+
+func (s *AuthService) ChangePassword(ctx context.Context, cmd command.ChangePasswordCommand) error {
+	credential, err := s.credentials.GetByUserID(ctx, cmd.UserID)
+	if err != nil {
+		return err
+	}
+
+	// 1. Verify Passwords (Giữ nguyên logic của bạn)
+	if err := s.authManager.VerifyPassword(cmd.CurrentPassword, credential.PasswordHash); err != nil {
+		return dto.ErrInvalidCredentials
+	}
+	if cmd.NewPassword == cmd.CurrentPassword {
+		return dto.ErrSameAsOldPassword
+	}
+	newPasswordHash, err := s.authManager.HashPassword(cmd.NewPassword)
+	if err != nil {
+		return err
+	}
+
+	// 2. Lấy danh sách session TRƯỚC KHI thực hiện DB Transaction
+	activeSessions, err := s.sessions.ListActiveByUserID(ctx, credential.UserID)
+	if err != nil {
+		return err
+	}
+
+	// Lọc ra các Redis keys cần xóa (bỏ qua session hiện tại)
+	var redisKeysToDelete []string
+	for _, session := range activeSessions {
+		// Chỉ thêm vào mảng xóa nếu KHÔNG PHẢI là session hiện tại
+		if session.ID != cmd.CurrentSessionID {
+			redisKeysToDelete = append(redisKeysToDelete, ports.RedisSessionKeyPrefix+session.RefreshTokenHash)
+		}
+	}
+
+	now := s.clock.Now()
+
+	// 3. Thực thi DB Transaction
+	err = s.txManager.WithinTransaction(ctx, func(txCtx context.Context) error {
+		if err := s.credentials.UpdatePasswordHash(txCtx, credential.UserID, newPasswordHash, now); err != nil {
+			return err
+		}
+
+		// Dùng hàm mới: Revoke tất cả TRỪ session hiện tại
+		if err := s.sessions.RevokeAllExcept(txCtx, credential.UserID, cmd.CurrentSessionID, now); err != nil {
+			return err
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	// 4. Xóa hàng loạt trên Redis SAU KHI DB Transaction thành công
+	if len(redisKeysToDelete) > 0 {
+		err = s.redisSession.DeleteMultipleSessions(ctx, redisKeysToDelete)
+		if err != nil {
+			// Lỗi cache không làm fail nghiệp vụ đổi mật khẩu
+			zap.L().Error("identity:Failed to batch delete sessions in Redis",
+				zap.Error(err),
+				zap.Int64("userID", credential.UserID),
+			)
+		} else {
+			zap.L().Info("identity:Batch deleted sessions in Redis successfully",
+				zap.Int("count", len(redisKeysToDelete)),
+			)
+		}
+	}
+
+	return nil
 }
 
 func hashToken(raw string) string {

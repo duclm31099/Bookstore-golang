@@ -212,3 +212,23 @@ func (r *SessionRepository) getByRefreshTokenHash(ctx context.Context, hash stri
 	}
 	return mapSessionRowToEntity(row), nil
 }
+
+const queryRevokeAllExcept = `
+	UPDATE user_sessions 
+	SET 
+		revoked_at = $3,
+		session_status = 'revoked'
+	WHERE 
+		user_id = $1 
+		AND id != $2 
+		AND revoked_at IS NULL 
+		AND session_status = 'active'
+`
+
+func (r *SessionRepository) RevokeAllExcept(ctx context.Context, userID int64, exceptSessionID int64, revokedAt time.Time) error {
+	db := tx.GetExecutor(ctx, r.pool)
+
+	_, err := db.Exec(ctx, queryRevokeAllExcept, userID, exceptSessionID, revokedAt)
+
+	return err
+}

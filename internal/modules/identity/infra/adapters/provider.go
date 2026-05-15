@@ -28,6 +28,10 @@ func ProvideOutboxEventPublisher(recorder outbox.Recorder, log *zap.Logger) port
 	return NewOutboxEventPublisher(recorder, log)
 }
 
+func ProvideRedisBlacklistAdapter(client *goredis.Client) ports.BlacklistPort {
+	return NewRedisBlacklistAdapter(client)
+}
+
 // ── Clock ────────────────────────────────────────────────────────────────────
 
 func ProvideRealClock() ports.Clock {
@@ -42,4 +46,5 @@ var ProviderSet = wire.NewSet(
 	ProvideRedisSessionService,
 	ProvideOutboxEventPublisher,
 	ProvideRealClock,
+	ProvideRedisBlacklistAdapter,
 )
