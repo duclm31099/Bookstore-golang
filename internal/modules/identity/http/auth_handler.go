@@ -60,14 +60,22 @@ func (h *AuthHandler) Register(c *gin.Context) {
 }
 
 func (h *AuthHandler) ChangePassword(c *gin.Context) {
+	ac, ok := authMiddleware.GetAuthContext(c)
+	if !ok {
+		httpx.Error(c, http.StatusUnauthorized, "NOT_AUTHENTICATED", "missing auth context")
+		return
+	}
+
 	var req ChangePasswordRequest
 	if !bindJSON(c, &req) {
 		return
 	}
 
 	err := h.authService.ChangePassword(c.Request.Context(), command.ChangePasswordCommand{
-		CurrentPassword: req.CurrentPassword,
-		NewPassword:     req.NewPassword,
+		UserID:           ac.UserID,
+		CurrentSessionID: ac.SessionID,
+		CurrentPassword:  req.CurrentPassword,
+		NewPassword:      req.NewPassword,
 	})
 	if err != nil {
 		writeAuthError(c, err)

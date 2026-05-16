@@ -33,6 +33,7 @@ type AuthContext struct {
 	Role      string
 	DeviceID  int64
 	SessionID int64
+	JTI       string
 }
 type AuthMiddleware gin.HandlerFunc
 
@@ -101,6 +102,7 @@ func NewAuthMiddleware(authManager *auth.Auth) AuthMiddleware {
 			Role:      claims.Role,
 			SessionID: sid,
 			DeviceID:  did,
+			JTI:       claims.RegisteredClaims.ID,
 		})
 
 		c.Next()
