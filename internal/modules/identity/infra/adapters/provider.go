@@ -16,10 +16,9 @@ func ProvideJWTAuthManager(cfg *config.Config) ports.AuthManager {
 }
 
 // ── Session Service ──────────────────────────────────────────────────────────
-// RedisSessionService thỏa mãn ports.RedisSessionService trực tiếp.
 
-func ProvideRedisSessionService(rdb *goredis.Client) ports.RedisSessionService {
-	return platformAuth.NewRedisSessionService(rdb)
+func ProvideRedisSessionService(rdb goredis.UniversalClient) ports.RedisSessionService {
+	return NewIdentityRedisSessionAdapter(rdb)
 }
 
 // ── Event Publisher ──────────────────────────────────────────────────────────

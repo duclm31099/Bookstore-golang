@@ -68,7 +68,7 @@ func InitializeAPIApp() (*APIApp, func(), error) {
 	idempotencyService := idempotency.NewDefaultService(store, processedEventStore, idempotencyClock, idempotencyConfig)
 	blacklistPort := adapters.ProvideRedisBlacklistAdapter(client)
 	strictAuthMiddleware := middleware.NewStrictAuthMiddleware(blacklistPort)
-	engine := ProvideGinEngine(config, logger, authHandler, profileHandler, addressHandler, authMiddleware, idempotencyService, strictAuthMiddleware)
+	engine := ProvideGinEngine(config, logger, client, authHandler, profileHandler, addressHandler, authMiddleware, idempotencyService, strictAuthMiddleware)
 	server := ProvideHTTPServer(config, engine)
 	duration := ProvideShutdownTimeout(config)
 	apiApp := ProvideAPIApp(server, logger, duration)

@@ -117,6 +117,7 @@ func ProvideUniversalRedisClient(client *goredis.Client) goredis.UniversalClient
 func ProvideGinEngine(
 	cfg *config.Config,
 	log *zap.Logger,
+	rdb *goredis.Client,
 	authHandler *identity_http.AuthHandler,
 	profileHandler *identity_http.ProfileHandler,
 	addressHandler *identity_http.AddressHandler,
@@ -124,7 +125,7 @@ func ProvideGinEngine(
 	idempotencySvc idempotency.Service,
 	strictAuthMiddleware identity_middleware.StrictAuthMiddleware,
 ) *gin.Engine {
-	engine := httpx.NewRouter(cfg, log)
+	engine := httpx.NewRouter(cfg, log, rdb)
 
 	idempotencyMiddleware := idempotency.GinMiddleware(idempotencySvc, idempotency.MiddlewareConfig{
 		KeyHeader: "Idempotency-Key",

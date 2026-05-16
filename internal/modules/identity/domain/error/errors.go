@@ -29,9 +29,10 @@ var (
 
 // ------------------ Credentials errors -----------------------
 var (
-	ErrCredentialNotFound = New("IDENTITY_CREDENTIAL_NOT_FOUND", "credential not found")
-	ErrInvalidCredentials = New("IDENTITY_INVALID_CREDENTIALS", "invalid email or password")
-	ErrPasswordTooWeak    = New("IDENTITY_PASSWORD_TOO_WEAK", "password does not meet requirements")
+	ErrCredentialNotFound  = New("IDENTITY_CREDENTIAL_NOT_FOUND", "credential not found")
+	ErrInvalidCredentials  = New("IDENTITY_INVALID_CREDENTIALS", "invalid email or password")
+	ErrPasswordTooWeak     = New("IDENTITY_PASSWORD_TOO_WEAK", "password does not meet requirements")
+	ErrResetTokenExpired   = New("IDENTITY_RESET_TOKEN_EXPIRED", "password reset token is invalid or has expired")
 )
 
 // ------------------ Session errors -----------------------

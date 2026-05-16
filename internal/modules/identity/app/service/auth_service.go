@@ -2,9 +2,7 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +16,7 @@ import (
 	err_domain "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/domain/error"
 	"github.com/duclm99/bookstore-backend-v2/internal/modules/identity/domain/policy"
 	value_object "github.com/duclm99/bookstore-backend-v2/internal/modules/identity/domain/value_object"
+	"github.com/duclm99/bookstore-backend-v2/internal/platform/cryptoutil"
 	"github.com/duclm99/bookstore-backend-v2/internal/platform/tx"
 	"go.uber.org/zap"
 )
@@ -210,14 +209,8 @@ func (s *AuthService) Login(ctx context.Context, cmd command.LoginCommand) (*dto
 	// để đảm bảo Refresh Token cũ lập tức bị vô hiệu hóa.
 	oldSession, err := s.sessions.GetByDeviceID(ctx, user.ID, deviceID)
 	if err == nil && oldSession != nil {
-		oldRedisKey := ports.RedisSessionKeyPrefix + string(oldSession.RefreshTokenHash)
-		zap.L().Info("identity:Deleting old session in Redis", zap.String("oldRedisKey", oldRedisKey))
-		err = s.redisSession.DeleteSession(ctx, oldRedisKey)
-		if err != nil {
-			zap.L().Warn("identity:Failed to delete old session in Redis", zap.Error(err), zap.String("oldRedisKey", oldRedisKey))
-		} else {
-			// Tùy chọn: Log info để biết đã xóa thành công (giống với dòng log msg:"identity:Deleting old session in Redis" của bạn)
-			zap.L().Info("identity:Successfully deleted old session in Redis", zap.String("oldRedisKey", oldRedisKey))
+		if err = s.redisSession.DeleteSession(ctx, oldSession.RefreshTokenHash); err != nil {
+			zap.L().Warn("identity:Failed to delete old session in Redis", zap.Error(err))
 		}
 	}
 	// 9. Create refresh token
@@ -236,7 +229,7 @@ func (s *AuthService) Login(ctx context.Context, cmd command.LoginCommand) (*dto
 	session := &entity.Session{
 		UserID:           user.ID,
 		DeviceID:         deviceID,
-		RefreshTokenHash: hashToken(rawRefreshToken),
+		RefreshTokenHash: cryptoutil.HashToken(rawRefreshToken),
 		SessionStatus:    string(entity.AccountStatusActive),
 		ExpiredAt:        now.Add(ttlDuration),
 		IPAddress:        &cmd.IPAddress,
@@ -261,16 +254,9 @@ func (s *AuthService) Login(ctx context.Context, cmd command.LoginCommand) (*dto
 	}
 
 	// 12. LƯU VÀO REDIS CÙNG VỚI TTL
-	// Chuyển struct thành JSON để lưu vào Redis
-	sessionJSON, err := json.Marshal(session)
-	if err == nil {
-		newRedisKey := ports.RedisSessionKeyPrefix + session.RefreshTokenHash
-		// Redis sẽ tự động xóa key này sau ttlDuration (VD: 30 ngày)
-		err = s.redisSession.SetUserSession(ctx, newRedisKey, sessionJSON, int64(ttlDuration.Seconds()))
-		if err != nil {
-			// Chỉ log warning, vì DB đã lưu thành công, không chặn luồng đăng nhập
-			zap.L().Warn("identity:Failed to save session to Redis", zap.Error(err))
-		}
+	if err = s.redisSession.StoreSession(ctx, session.RefreshTokenHash, session, ttlDuration); err != nil {
+		// Chỉ log warning, vì DB đã lưu thành công, không chặn luồng đăng nhập
+		zap.L().Warn("identity:Failed to save session to Redis", zap.Error(err))
 	}
 
 	// 11. Return data to http layer
@@ -283,8 +269,7 @@ func (s *AuthService) Login(ctx context.Context, cmd command.LoginCommand) (*dto
 }
 
 func (s *AuthService) RefreshToken(ctx context.Context, cmd command.RefreshTokenCommand) (*dto.RefreshTokenOutput, error) {
-	oldHash := hashToken(cmd.RefreshToken)
-	redisKey := ports.RedisSessionKeyPrefix + oldHash
+	oldHash := cryptoutil.HashToken(cmd.RefreshToken)
 	now := s.clock.Now()
 
 	var session *entity.Session
@@ -292,15 +277,16 @@ func (s *AuthService) RefreshToken(ctx context.Context, cmd command.RefreshToken
 	// ==========================================
 	// 1. CACHE-ASIDE: KIỂM TRA REDIS TRƯỚC
 	// ==========================================
-	sessionJSON, err := s.redisSession.GetUserSession(ctx, redisKey) // Trả về chuỗi JSON nếu có
-	if err == nil && sessionJSON != nil {
-		// HIT CACHE: Tuyệt vời! Bỏ qua truy vấn tìm Session ở DB
-		session = &entity.Session{}
-		if err := json.Unmarshal([]byte(sessionJSON.(string)), session); err != nil {
-			return nil, err
-		}
+	var err error
+	cachedSession, cacheErr := s.redisSession.GetSession(ctx, oldHash)
+	if cachedSession != nil {
+		// HIT CACHE: Bỏ qua truy vấn tìm Session ở DB
+		session = cachedSession
 	} else {
-		// MISS CACHE: Không có trong Redis -> Chọc xuống DB để dự phòng
+		// MISS CACHE hoặc Redis lỗi (Fail-Open) -> Chọc xuống DB để dự phòng
+		if cacheErr != nil {
+			zap.L().Warn("RefreshToken: cache get failed, falling back to DB", zap.Error(cacheErr))
+		}
 		session, err = s.sessions.GetByRefreshTokenHash(ctx, oldHash)
 		if err != nil {
 			return nil, err_domain.ErrInvalidCredentials // Trả về 401 Unauthorized
@@ -339,7 +325,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, cmd command.RefreshToken
 	if err != nil {
 		return nil, err
 	}
-	newHash := hashToken(newRawRefreshToken)
+	newHash := cryptoutil.HashToken(newRawRefreshToken)
 
 	newAccessToken, expiredAt, err := s.authManager.GenerateAccessToken(
 		user.ID,
@@ -385,26 +371,18 @@ func (s *AuthService) RefreshToken(ctx context.Context, cmd command.RefreshToken
 	// 6. ĐỒNG BỘ NGƯỢC LÊN REDIS (Sync Cache)
 	// ==========================================
 	// Xóa cái hash cũ đi để không ai dùng được nữa
-	err = s.redisSession.DeleteSession(ctx, redisKey)
-	if err != nil {
+	if err = s.redisSession.DeleteSession(ctx, oldHash); err != nil {
 		zap.L().Error("RefreshToken:Failed to delete session", zap.Error(err))
 	}
 	zap.L().Debug("RefreshToken:Delete session successfully")
 
-	// Đẩy cái session với hash mới lên lại Redis
-	newRedisKey := ports.RedisSessionKeyPrefix + newHash
-	newSessionJSON, _ := json.Marshal(session)
-	zap.L().Debug("RefreshToken:Marshal session successfully")
 	// Tính thời gian sống (TTL) của Redis đúng bằng khoảng thời gian token hết hạn
 	ttl := time.Until(session.ExpiredAt)
 
 	// Dùng Goroutine đẩy lên Redis ngầm (Fire and Forget) để API phản hồi ngay lập tức cho User
 	go func() {
-		// Lưu ý: Trong thực tế nên dùng một context riêng (background context)
-		// cho goroutine để không bị chết khi request ctx bị timeout.
 		bgCtx := context.Background()
-		err := s.redisSession.SetUserSession(bgCtx, newRedisKey, newSessionJSON, int64(ttl))
-		if err != nil {
+		if err := s.redisSession.StoreSession(bgCtx, newHash, session, ttl); err != nil {
 			zap.L().Error("RefreshToken:Failed to set session", zap.Error(err))
 		}
 		zap.L().Debug("RefreshToken:Set session successfully")
@@ -456,12 +434,12 @@ func (s *AuthService) ChangePassword(ctx context.Context, cmd command.ChangePass
 		return err
 	}
 
-	// Lọc ra các Redis keys cần xóa (bỏ qua session hiện tại)
-	var redisKeysToDelete []string
+	// Lọc ra các session cần xóa khỏi Redis (bỏ qua session hiện tại)
+	var hashesToDelete []string
 	for _, session := range activeSessions {
 		// Chỉ thêm vào mảng xóa nếu KHÔNG PHẢI là session hiện tại
 		if session.ID != cmd.CurrentSessionID {
-			redisKeysToDelete = append(redisKeysToDelete, ports.RedisSessionKeyPrefix+session.RefreshTokenHash)
+			hashesToDelete = append(hashesToDelete, session.RefreshTokenHash)
 		}
 	}
 
@@ -486,9 +464,8 @@ func (s *AuthService) ChangePassword(ctx context.Context, cmd command.ChangePass
 	}
 
 	// 4. Xóa hàng loạt trên Redis SAU KHI DB Transaction thành công
-	if len(redisKeysToDelete) > 0 {
-		err = s.redisSession.DeleteMultipleSessions(ctx, redisKeysToDelete)
-		if err != nil {
+	if len(hashesToDelete) > 0 {
+		if err = s.redisSession.DeleteSessions(ctx, hashesToDelete); err != nil {
 			// Lỗi cache không làm fail nghiệp vụ đổi mật khẩu
 			zap.L().Error("identity:Failed to batch delete sessions in Redis",
 				zap.Error(err),
@@ -496,7 +473,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, cmd command.ChangePass
 			)
 		} else {
 			zap.L().Info("identity:Batch deleted sessions in Redis successfully",
-				zap.Int("count", len(redisKeysToDelete)),
+				zap.Int("count", len(hashesToDelete)),
 			)
 		}
 	}
@@ -504,9 +481,106 @@ func (s *AuthService) ChangePassword(ctx context.Context, cmd command.ChangePass
 	return nil
 }
 
-func hashToken(raw string) string {
-	sum := sha256.Sum256([]byte(raw))
-	return hex.EncodeToString(sum[:])
+func (s *AuthService) ForgotPassword(ctx context.Context, cmd command.ForgotPasswordCommand) error {
+	email, err := value_object.NewEmail(cmd.Email)
+	if err != nil {
+		return err
+	}
+
+	user, err := s.users.GetByEmail(ctx, email)
+	if err != nil {
+		// Enumeration attack prevention: không tiết lộ email có tồn tại không.
+		// Luôn trả success để attacker không phân biệt được email đã đăng ký hay chưa.
+		if errors.Is(err, err_domain.ErrUserNotFound) {
+			return nil
+		}
+		return err
+	}
+
+	token, err := cryptoutil.GenerateSecureToken()
+	if err != nil {
+		return err
+	}
+
+	if err := s.redisSession.StorePasswordResetToken(ctx, token, user.ID, 15*time.Minute); err != nil {
+		return err
+	}
+
+	if err := s.eventPublisher.PublishResetPasswordRequested(ctx, ports.ResetPasswordRequestedPayload{
+		UserID: user.ID,
+		Email:  user.Email.String(),
+		Token:  token,
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *AuthService) ResetPassword(ctx context.Context, cmd command.ResetPasswordCommand) error {
+	// 1. Validate password strength trước — fail fast, tránh gọi Redis không cần thiết
+	if err := s.registerPolicy.ValidatePassword(cmd.NewPassword); err != nil {
+		return err
+	}
+
+	// 2. Xác minh token: hash → GetDel (atomic, single-use) → userID
+	// ParsePasswordResetToken trả ErrResetTokenExpired nếu token không tồn tại hoặc đã dùng
+	userID, err := s.redisSession.ParsePasswordResetToken(ctx, cmd.Token)
+	if err != nil {
+		return err_domain.ErrResetTokenExpired
+	}
+
+	// 3. Lấy user để điền email vào event payload
+	user, err := s.users.GetByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	// 4. Thu thập Redis keys TRƯỚC transaction để xóa cache sau khi DB thành công.
+	// Phải đọc trước transaction vì bên trong transaction không được dùng ctx gốc.
+	activeSessions, err := s.sessions.ListActiveByUserID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	hashesToDelete := make([]string, 0, len(activeSessions))
+	for _, session := range activeSessions {
+		hashesToDelete = append(hashesToDelete, session.RefreshTokenHash)
+	}
+
+	hashedPassword, err := s.authManager.HashPassword(cmd.NewPassword)
+	if err != nil {
+		return err
+	}
+
+	// 5. Transaction: cập nhật mật khẩu + thu hồi tất cả session trong DB + publish event.
+	// Event dùng txctx để ghi vào outbox_events TRONG transaction — đảm bảo
+	// email chỉ được gửi khi và chỉ khi password thực sự được đổi thành công.
+	if err := s.txManager.WithinTransaction(ctx, func(txctx context.Context) error {
+		if err := s.credentials.UpdatePasswordHash(txctx, userID, hashedPassword, s.clock.Now()); err != nil {
+			return err
+		}
+		if err := s.sessions.RevokeAllByUserID(txctx, userID, s.clock.Now()); err != nil {
+			return err
+		}
+		return s.eventPublisher.PublishResetPasswordCompleted(txctx, ports.ResetPasswordCompletedPayload{
+			UserID: userID,
+			Email:  user.Email.String(),
+		})
+	}); err != nil {
+		return err
+	}
+
+	// 6. Xóa Redis session cache SAU KHI DB transaction thành công.
+	// Dùng ctx gốc, không phải txctx. Lỗi Redis không fail nghiệp vụ — chỉ log.
+	if len(hashesToDelete) > 0 {
+		if err := s.redisSession.DeleteSessions(ctx, hashesToDelete); err != nil {
+			zap.L().Error("identity:ResetPassword: failed to delete session cache",
+				zap.Error(err),
+				zap.Int64("userID", userID),
+			)
+		}
+	}
+
+	return nil
 }
 
 func normalizeOptionalString(v *string) *string {
